@@ -26,9 +26,7 @@ export async function openExternal(path: string): Promise<void> {
     toast("warning", "Open works in the desktop app.");
     return;
   }
-  const target = path.startsWith("zip:") ? await invoke<string>("export_zip_entry", { path }) : path;
-  const { openPath } = await import("@tauri-apps/plugin-opener");
-  await openPath(target);
+  await invoke("open_item", { path });
 }
 
 export async function setWindowTitle(title: string): Promise<void> {

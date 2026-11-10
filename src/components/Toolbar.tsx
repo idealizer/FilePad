@@ -1,4 +1,4 @@
-import { ArrowRightLeft, Columns2, Command, Copy, Eye, EyeOff, FolderPlus, Monitor, Moon, Pencil, Sun, Terminal, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderPlus, Ghost, Monitor, Moon, Palette, Pencil, Sun, Terminal, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { keys } from "../lib/platform";
 import { useApp } from "../stores/appStore";
@@ -16,9 +16,13 @@ export function Toolbar() {
   const setTheme = useApp((state) => state.setTheme);
   const showHidden = useApp((state) => state.showHidden);
   const toggleHidden = useApp((state) => state.toggleHidden);
+  const iconColors = useApp((state) => state.iconColors);
+  const askColors = useApp((state) => state.askColors);
   const terminalOpen = useApp((state) => state.terminalOpen);
   const toggleTerminal = useApp((state) => state.toggleTerminal);
   const askMkdir = useApp((state) => state.askMkdir);
+  const askMkfile = useApp((state) => state.askMkfile);
+  const askAbout = useApp((state) => state.askAbout);
   const askRename = useApp((state) => state.askRename);
   const askDelete = useApp((state) => state.askDelete);
   const copyToOther = useApp((state) => state.copyToOther);
@@ -30,16 +34,18 @@ export function Toolbar() {
   const next = themes[(index + 1) % themes.length];
   return (
     <header className="flex h-11 shrink-0 items-center gap-0.5 border-b border-[var(--border)] bg-[var(--bg)] px-2">
-      <span className="px-2 font-semibold">FilePad</span>
+      <button className="tb-btn font-semibold text-[var(--text)]" data-tip="About FilePad" onClick={askAbout}>FilePad</button>
       <span className="tb-sep" />
       <button className="tb-btn" data-tip="New folder (F7)" onClick={askMkdir}><FolderPlus /></button>
+      <button className="tb-btn" data-tip="New file (Shift+F7)" onClick={askMkfile}><FilePlus /></button>
       <button className="tb-btn" data-tip="Copy to the other panel (F5)" onClick={() => void copyToOther()}><Copy /></button>
       <button className="tb-btn" data-tip="Move to the other panel (F6)" onClick={() => void moveToOther()}><ArrowRightLeft /></button>
       <button className="tb-btn" data-tip="Rename (F2)" onClick={askRename}><Pencil /></button>
       <button className="tb-btn" data-tip="Delete (F8)" onClick={askDelete}><Trash2 /></button>
       <span className="tb-sep" />
       <button className="tb-btn" data-tip="Preview in the other panel (F3)" onClick={previewOther}><Eye /></button>
-      <button className="tb-btn" data-active={showHidden} data-tip="Show hidden files" onClick={toggleHidden}>{showHidden ? <Eye /> : <EyeOff />}</button>
+      <button className="tb-btn" data-active={showHidden} data-tip={showHidden ? "Hidden files are visible" : "Hidden files are off"} onClick={toggleHidden}><Ghost /></button>
+      <button className="tb-btn" data-active={iconColors} data-tip="Icon colors" onClick={askColors}><Palette /></button>
       <button className="tb-btn" data-active={terminalOpen} data-tip={`Terminal (${keys("Ctrl+`")})`} onClick={toggleTerminal}><Terminal /></button>
       <span className="flex-1" />
       <button className="tb-btn" data-tip={`Commands (${keys("Ctrl+K")})`} onClick={() => setPalette(true)}><Command /></button>

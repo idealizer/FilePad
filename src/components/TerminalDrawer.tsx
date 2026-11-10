@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import "@xterm/xterm/css/xterm.css";
-import { diskFolder } from "../lib/format";
+import { diskFolder, isRemotePath } from "../lib/format";
 import { invoke, message } from "../lib/platform";
 import { dragHeight } from "./DragBar";
 import { useApp } from "../stores/appStore";
@@ -96,8 +96,12 @@ export function TerminalDrawer() {
         <button
           className="btn sm"
           onClick={() => {
-            const folder = diskFolder(useApp.getState().panels[useApp.getState().active].path);
-            void invoke("terminal_cd", { path: folder }).catch((error: unknown) => toast("error", message(error)));
+            const folder = useApp.getState().panels[useApp.getState().active].path;
+            if (isRemotePath(folder)) {
+              toast("warning", "The terminal stays on this computer.");
+              return;
+            }
+            void invoke("terminal_cd", { path: diskFolder(folder) }).catch((error: unknown) => toast("error", message(error)));
           }}
         >
           Use this folder

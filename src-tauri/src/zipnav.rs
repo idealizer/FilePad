@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -33,6 +33,16 @@ pub struct ZipCopy {
     pub conflicts: Vec<String>,
 }
 
+pub struct ZipStat {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u64,
+    pub extension: String,
+    pub files: u64,
+    pub folders: u64,
+}
+
 pub fn split(raw: &str) -> Option<(PathBuf, String)> {
     let rest = raw.trim().strip_prefix("zip:")?;
     let (archive, inner) = rest.split_once('|')?;
@@ -44,6 +54,69 @@ pub fn split(raw: &str) -> Option<(PathBuf, String)> {
 
 pub fn is_zip_file(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
+pub fn stat(archive: &Path, inner: &str) -> Result<ZipStat, String> {
+    let inner = normalize(inner);
+    let mut zip = open_zip(archive)?;
+    let mut rows = Vec::new();
+    for index in 0..zip.len() {
+        let entry = zip.by_index(index).map_err(|err| format!("Can't read that zip: {err}"))?;
+        let name = normalize(entry.name());
+        if name.is_empty() {
+            continue;
+        }
+        let extension = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
+        rows.push((name, entry.is_dir(), entry.size(), entry.last_modified().map(zip_modified_ms).unwrap_or(0), extension));
+    }
+    if inner.is_empty() {
+        let files = rows.iter().filter(|row| !row.1).count() as u64;
+        let name = archive.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| "archive.zip".into());
+        return Ok(ZipStat { name, is_dir: true, size: 0, modified: 0, extension: "zip".into(), files, folders: 0 });
+    }
+    if let Some(found) = rows.iter().find(|row| row.0 == inner) {
+        if !found.1 {
+            let name = inner.rsplit('/').next().unwrap_or(&inner).to_string();
+            return Ok(ZipStat {
+                name,
+                is_dir: false,
+                size: found.2,
+                modified: found.3,
+                extension: found.4.clone(),
+                files: 0,
+                folders: 0,
+            });
+        }
+    }
+    let prefix = format!("{inner}/");
+    if rows.iter().any(|row| row.0 == inner || row.0.starts_with(&prefix)) {
+        let (files, folders) = immediate(&rows, &inner);
+        let name = inner.rsplit('/').next().unwrap_or(&inner).to_string();
+        return Ok(ZipStat { name, is_dir: true, size: 0, modified: 0, extension: String::new(), files, folders });
+    }
+    Err("Can't find that item in the zip.".into())
+}
+
+fn immediate(rows: &[(String, bool, u64, u64, String)], inner: &str) -> (u64, u64) {
+    let prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
+    let mut folders = BTreeSet::new();
+    let mut files = 0u64;
+    for (name, is_dir, _, _, _) in rows {
+        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+        if rest.is_empty() {
+            continue;
+        }
+        if *is_dir || rest.contains('/') {
+            if let Some(child) = rest.split('/').next() {
+                if !child.is_empty() {
+                    folders.insert(child.to_string());
+                }
+            }
+        } else {
+            files += 1;
+        }
+    }
+    (files, folders.len() as u64)
 }
 
 pub fn list(archive: &Path, inner: &str) -> Result<ZipListing, String> {
@@ -166,14 +239,14 @@ pub fn extract(sources: &[String], dest_dir: &Path, overwrite: bool, progress: &
     let mut jobs = Vec::new();
     for source in sources {
         let (archive, inner) = split(source).ok_or_else(|| "Copy zip contents separately from other files.".to_string())?;
-        if inner.is_empty() {
-            return Err("Open the zip and pick the files inside.".into());
-        }
         let leaf = inner.rsplit('/').next().unwrap_or(&inner).to_string();
         jobs.push((archive, inner, leaf));
     }
     let mut conflicts = Vec::new();
     for (_, _, leaf) in &jobs {
+        if leaf.is_empty() {
+            continue;
+        }
         if dest_dir.join(leaf).exists() {
             conflicts.push(leaf.clone());
         }
@@ -303,8 +376,14 @@ pub fn create_zip(sources: &[String], dest: &str) -> Result<String, String> {
     if sources.is_empty() {
         return Err("Nothing selected.".into());
     }
-    if sources.iter().any(|source| source.trim().starts_with("zip:")) {
-        return Err("Copy files out of a zip before packing them.".into());
+    if sources.iter().any(|source| {
+        let source = source.trim();
+        source.starts_with("zip:") || source.starts_with("gz:") || source.starts_with("sftp:")
+    }) {
+        return Err("Copy files out of an archive before packing them.".into());
+    }
+    if dest.trim().starts_with("sftp:") {
+        return Err("Create the zip on this computer, then copy it to the server.".into());
     }
     let dest_path = PathBuf::from(dest.trim());
     if dest_path.as_os_str().is_empty() {
@@ -476,6 +555,12 @@ mod tests {
         let copied = extract(&[source], &dest, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(copied.done, 1);
         assert_eq!(fs::read(dest.join("dir").join("a.txt")).unwrap(), b"aaa");
+        let all = dir.join("all");
+        fs::create_dir_all(&all).unwrap();
+        let whole = extract(&[token(&archive, "")], &all, true, &mut |_, _, _| {}).unwrap();
+        assert_eq!(whole.done, 2);
+        assert_eq!(fs::read(all.join("readme.txt")).unwrap(), b"hello");
+        assert_eq!(stat(&archive, "").unwrap().files, 2);
         let _ = fs::remove_dir_all(&dir);
     }
 

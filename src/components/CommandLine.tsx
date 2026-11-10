@@ -1,3 +1,4 @@
+import { Play, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { diskFolder, shortPath } from "../lib/format";
 import { useApp } from "../stores/appStore";
@@ -21,7 +22,7 @@ export function CommandLine() {
     if (box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [output]);
   return (
-    <div className="shrink-0 border-t border-[var(--border)] bg-[var(--bg)]">
+    <div className="min-w-0 shrink-0 overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
       {outputOpen && output && (
         <div className="relative">
           <div
@@ -60,8 +61,8 @@ export function CommandLine() {
             }
           }}
         />
-        <button className="btn sm primary" type="submit" disabled={running || !command.trim()}>Run</button>
-        {running && <button className="btn sm" type="button" onClick={() => void cancelCommand()}>Stop</button>}
+        <button className="tb-btn" type="submit" disabled={running || !command.trim()} data-tip={running ? "Running…" : "Run"} style={command.trim() && !running ? { color: "var(--accent)" } : undefined}><Play /></button>
+        {running && <button className="tb-btn" type="button" data-tip="Stop" style={{ color: "var(--danger)" }} onClick={() => void cancelCommand()}><Square /></button>}
       </form>
     </div>
   );

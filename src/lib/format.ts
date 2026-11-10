@@ -47,28 +47,96 @@ export function isZipPath(path: string): boolean {
   return path.startsWith("zip:");
 }
 
-export function displayPath(path: string): string {
-  if (!isZipPath(path)) return path;
-  const body = path.slice(4);
-  const bar = body.indexOf("|");
-  if (bar < 0) return path;
-  const archive = body.slice(0, bar);
-  const inner = body.slice(bar + 1).replaceAll("/", "\\");
-  return inner ? `${archive}\\${inner}` : archive;
+export function isPackedPath(path: string): boolean {
+  return path.startsWith("zip:") || path.startsWith("gz:");
 }
 
-export function storePath(draft: string): string {
+export function isRemotePath(path: string): boolean {
+  return path.startsWith("sftp:");
+}
+
+export function remoteParts(path: string): { id: string; remote: string } | null {
+  if (!path.startsWith("sftp:")) return null;
+  const rest = path.slice(5);
+  const cut = rest.indexOf(":");
+  if (cut <= 0) return null;
+  return { id: rest.slice(0, cut), remote: rest.slice(cut + 1) || "/" };
+}
+
+function packedBody(path: string): { prefix: "zip" | "gz"; archive: string; inner: string } | null {
+  const prefix = path.startsWith("zip:") ? "zip" : path.startsWith("gz:") ? "gz" : "";
+  if (!prefix) return null;
+  const body = path.slice(prefix.length + 1);
+  const bar = body.indexOf("|");
+  if (bar < 0) return { prefix, archive: body, inner: "" };
+  return { prefix, archive: body.slice(0, bar), inner: body.slice(bar + 1) };
+}
+
+export function displayPath(path: string): string {
+  const remote = remoteParts(path);
+  if (remote) return `sftp ${remote.remote}`;
+  const packed = packedBody(path);
+  if (!packed) return path;
+  const inner = packed.inner.replaceAll("/", "\\");
+  return inner ? `${packed.archive}\\${inner}` : packed.archive;
+}
+
+export function storePath(draft: string, current = ""): string {
   const text = draft.trim();
-  if (text.toLowerCase().startsWith("zip:")) return text;
-  const match = /^(.*\.zip)(?:[\\/](.*))?$/i.exec(text);
-  if (!match) return text;
-  const inner = (match[2] ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  return `zip:${match[1]}|${inner}`;
+  const lower = text.toLowerCase();
+  if (lower.startsWith("sftp:")) return text;
+  const remote = remoteParts(current);
+  if (remote && (text.startsWith("/") || lower.startsWith("sftp "))) {
+    const next = text.replace(/^sftp\s+/i, "");
+    return `sftp:${remote.id}:${next.startsWith("/") ? next : `/${next}`}`;
+  }
+  if (lower.startsWith("zip:") || lower.startsWith("gz:")) return text;
+  const zip = /^(.*\.zip)(?:[\\/](.*))?$/i.exec(text);
+  if (zip) {
+    const inner = (zip[2] ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+    return `zip:${zip[1]}|${inner}`;
+  }
+  const gz = /^(.*\.(?:tar\.gz|tgz|gzip|gz))(?:[\\/](.*))?$/i.exec(text);
+  if (!gz) return text;
+  const inner = (gz[2] ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  return `gz:${gz[1]}|${inner}`;
+}
+
+export function zipInner(path: string): string | null {
+  return packedBody(path)?.inner ?? null;
+}
+
+function isGzName(path: string): boolean {
+  return /\.(?:tar\.gz|tgz|gzip|gz)$/i.test(path);
+}
+
+export function archiveFile(path: string): string | null {
+  const packed = packedBody(path);
+  if (!packed) return /\.zip$/i.test(path) || isGzName(path) ? path : null;
+  if (packed.inner) return null;
+  return packed.archive || null;
+}
+
+export function canExtract(path: string): boolean {
+  if (archiveFile(path)) return true;
+  const packed = packedBody(path);
+  if (!packed) return false;
+  const inner = packed.inner.toLowerCase();
+  return !/\.(?:zip|tar\.gz|tgz|gzip|gz)$/i.test(inner);
+}
+
+const stillImages = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+
+export function isStillImage(path: string): boolean {
+  const name = baseName(path);
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && stillImages.has(name.slice(dot + 1).toLowerCase());
 }
 
 export function diskFolder(path: string): string {
-  if (!isZipPath(path)) return path;
-  const archive = path.slice(4).split("|")[0] ?? "";
-  const cut = Math.max(archive.lastIndexOf("\\"), archive.lastIndexOf("/"));
-  return cut > 0 ? archive.slice(0, cut) : archive;
+  if (isRemotePath(path)) return "";
+  const packed = packedBody(path);
+  if (!packed) return path;
+  const cut = Math.max(packed.archive.lastIndexOf("\\"), packed.archive.lastIndexOf("/"));
+  return cut > 0 ? packed.archive.slice(0, cut) : packed.archive;
 }

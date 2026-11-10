@@ -9,6 +9,12 @@ export interface SessionData {
   leftView: ViewMode;
   rightView: ViewMode;
   showHidden: boolean;
+  iconColors: boolean;
+  iconTints: Record<string, string>;
+  leftHistory: string[];
+  rightHistory: string[];
+  leftHistoryAt: number;
+  rightHistoryAt: number;
   recent: string[];
   commandHistory: string[];
   split: number;
@@ -27,6 +33,12 @@ export function defaultSession(): SessionData {
     leftView: "details",
     rightView: "details",
     showHidden: false,
+    iconColors: true,
+    iconTints: {},
+    leftHistory: [],
+    rightHistory: [],
+    leftHistoryAt: 0,
+    rightHistoryAt: 0,
     recent: [],
     commandHistory: [],
     split: 0.5,

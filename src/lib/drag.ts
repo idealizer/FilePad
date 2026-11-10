@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { parentPath } from "./format";
+import { invoke, message } from "./platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
 
@@ -39,12 +40,30 @@ function clearSession() {
   publish();
 }
 
-export function armDrag(event: { button: number; clientX: number; clientY: number }, readPaths: () => string[]) {
+type DragStart = {
+  button: number;
+  clientX: number;
+  clientY: number;
+  pointerId: number;
+  currentTarget: EventTarget | null;
+};
+
+export function armDrag(event: DragStart, readPaths: () => string[]) {
   if (event.button !== 0) return;
+  const captured = event.currentTarget instanceof Element ? event.currentTarget : null;
+  const pointerId = event.pointerId;
+  if (captured) {
+    try {
+      captured.setPointerCapture(pointerId);
+    } catch {
+      /* the row can still start an inside drag */
+    }
+  }
   stopListeners?.();
   const startX = event.clientX;
   const startY = event.clientY;
   let active = false;
+  let handedOff = false;
 
   const hit = (clientX: number, clientY: number) => {
     const node = document.elementFromPoint(clientX, clientY);
@@ -66,9 +85,16 @@ export function armDrag(event: { button: number; clientX: number; clientY: numbe
       const place = hit(ev.clientX, ev.clientY);
       session = { paths, x: ev.clientX, y: ev.clientY, move: ev.shiftKey, ...place };
       publish();
-      return;
     }
     if (!session) return;
+    if (ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight) {
+      const paths = session.paths.slice();
+      handedOff = true;
+      if (captured?.hasPointerCapture(pointerId)) captured.releasePointerCapture(pointerId);
+      finish();
+      void invoke("start_file_drag", { paths }).catch((reason: unknown) => toast("error", message(reason)));
+      return;
+    }
     session = { ...session, x: ev.clientX, y: ev.clientY, move: ev.shiftKey, ...hit(ev.clientX, ev.clientY) };
     publish();
   };
@@ -90,7 +116,7 @@ export function armDrag(event: { button: number; clientX: number; clientY: numbe
 
   const up = (ev: PointerEvent) => {
     const current = session;
-    const dropped = active;
+    const dropped = active && !handedOff;
     finish();
     if (!dropped || !current?.over) return;
     const dest = current.over.replace(/[\\/]+$/, "");

@@ -1,18 +1,35 @@
-import { AlignJustify, ChevronDown, Eye, FolderTree, List, Search } from "lucide-react";
+import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, LayoutGrid, List, MemoryStick, Monitor, Network, Search, Usb } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDragSession } from "../lib/drag";
-import { displayPath, storePath } from "../lib/format";
+import { displayPath, isRemotePath, storePath } from "../lib/format";
 import { fileRows } from "../lib/rows";
 import { useApp } from "../stores/appStore";
 import type { Side, ViewMode } from "../types";
 import { DirTree } from "./DirTree";
 import { FileList } from "./FileList";
+import { IconView } from "./IconView";
 import { Dropdown, MenuItem } from "./Menu";
 import { PreviewPane } from "./PreviewPane";
+import { PanelStatus } from "./StatusBar";
+
+function placeIcon(place: { name: string; kind: string; role?: string }) {
+  switch (place.role || place.name.toLowerCase()) {
+    case "home": return <House />;
+    case "desktop": return <Monitor />;
+    case "documents": return <FileText />;
+    case "downloads": return <Download />;
+    case "removable": return <Usb />;
+    case "remote": return <Network />;
+    case "cd": return <Disc />;
+    case "ram": return <MemoryStick />;
+    default: return place.kind === "drive" ? <HardDrive /> : <Folder />;
+  }
+}
 
 const views: { id: ViewMode; label: string; icon: ReactNode }[] = [
   { id: "files", label: "Files", icon: <List /> },
   { id: "details", label: "Details", icon: <AlignJustify /> },
+  { id: "icons", label: "Icons", icon: <LayoutGrid /> },
   { id: "tree", label: "Tree", icon: <FolderTree /> },
   { id: "preview", label: "Preview", icon: <Eye /> },
 ];
@@ -24,8 +41,10 @@ export function Panel({ side }: { side: Side }) {
   const navigate = useApp((state) => state.navigate);
   const setFilter = useApp((state) => state.setFilter);
   const setView = useApp((state) => state.setView);
+  const goHistory = useApp((state) => state.goHistory);
   const places = useApp((state) => state.places);
   const recent = useApp((state) => state.recent);
+  const sftpProfiles = useApp((state) => state.sftpProfiles);
   const loadPlaces = useApp((state) => state.loadPlaces);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
@@ -44,6 +63,13 @@ export function Panel({ side }: { side: Side }) {
       data-drop-path={panel.path}
       tabIndex={-1}
       className="fp-panel flex min-w-0 flex-1 flex-col outline-none"
+      onMouseDownCapture={(event) => {
+        if (event.button !== 3 && event.button !== 4) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setActive(side);
+        void goHistory(side, event.button === 3 ? -1 : 1);
+      }}
       onMouseDown={(event) => {
         setActive(side);
         const target = event.target;
@@ -66,7 +92,7 @@ export function Panel({ side }: { side: Side }) {
           onSubmit={(event) => {
             event.preventDefault();
             setEditing(false);
-            void navigate(side, storePath(draft));
+            void navigate(side, storePath(draft, panel.path));
           }}
         >
           <input
@@ -80,7 +106,7 @@ export function Panel({ side }: { side: Side }) {
           />
         </form>
         <Dropdown
-          align={side === "right" ? "end" : "start"}
+          align="end"
           button={({ open, toggle }) => (
             <button className="tb-btn" data-active={open} data-tip="Places" onClick={() => { void loadPlaces(); toggle(); }}>
               <ChevronDown />
@@ -91,23 +117,37 @@ export function Panel({ side }: { side: Side }) {
             <>
               <div className="menu-label">Places</div>
               {places.filter((place) => place.kind === "place").map((place) => (
-                <MenuItem key={place.path} label={place.name} title={place.path} onClick={() => { close(); void navigate(side, place.path); }} />
+                <MenuItem key={place.path} icon={placeIcon(place)} label={place.name} title={place.path} onClick={() => { close(); void navigate(side, place.path); }} />
               ))}
               <div className="menu-sep" />
               <div className="menu-label">Drives</div>
               {places.filter((place) => place.kind === "drive").map((place) => (
-                <MenuItem key={place.path} label={place.name} title={place.path} onClick={() => { close(); void navigate(side, place.path); }} />
+                <MenuItem key={place.path} icon={placeIcon(place)} label={place.name} title={place.path} onClick={() => { close(); void navigate(side, place.path); }} />
               ))}
               {recent.length > 0 && <div className="menu-sep" />}
               {recent.length > 0 && <div className="menu-label">Recent</div>}
               {recent.map((path) => (
-                <MenuItem key={path} label={displayPath(path)} title={displayPath(path)} onClick={() => { close(); void navigate(side, path); }} />
+                <MenuItem key={path} icon={<Folder />} label={displayPath(path)} title={displayPath(path)} onClick={() => { close(); void navigate(side, path); }} />
+              ))}
+              <div className="menu-sep" />
+              <MenuItem icon={<Network />} label="Connect to SFTP" onClick={() => { close(); setActive(side); useApp.getState().askSftp(); }} />
+              {isRemotePath(panel.path) && <MenuItem icon={<Network />} label="Disconnect" onClick={() => { close(); setActive(side); void useApp.getState().disconnectSftp(side); }} />}
+              {sftpProfiles.map((profile) => (
+                <MenuItem key={profile.id} icon={<Network />} label={profile.label} title={`${profile.username}@${profile.host}`} onClick={() => {
+                  close();
+                  setActive(side);
+                  void useApp.getState().submitSftp({ profileId: profile.id, label: profile.label, host: profile.host, port: String(profile.port), username: profile.username, password: "", privateKey: "", passphrase: "", remotePath: profile.remotePath });
+                }} />
               ))}
             </>
           )}
         </Dropdown>
       </div>
       <div className="flex items-center gap-2 border-b border-[var(--border)] px-2 py-1">
+        <div className="flex items-center">
+          <button className="tb-btn" data-tip="Back (Alt+Left)" disabled={panel.historyAt <= 0} onClick={() => void goHistory(side, -1)}><ChevronLeft /></button>
+          <button className="tb-btn" data-tip="Forward (Alt+Right)" disabled={panel.historyAt >= panel.history.length - 1} onClick={() => void goHistory(side, 1)}><ChevronRight /></button>
+        </div>
         <div className="seg">
           {views.map((view) => (
             <button
@@ -131,7 +171,8 @@ export function Panel({ side }: { side: Side }) {
           <input className="field fp-filter h-7 w-full pl-7" placeholder="Filter" value={panel.filter} onChange={(event) => setFilter(side, event.target.value)} />
         </div>
       </div>
-      {panel.view === "preview" ? <PreviewPane side={side} /> : panel.view === "tree" ? <DirTree side={side} /> : <FileList side={side} />}
+      {panel.view === "preview" ? <PreviewPane side={side} /> : panel.view === "tree" ? <DirTree side={side} /> : panel.view === "icons" ? <IconView side={side} /> : <FileList side={side} />}
+      <PanelStatus side={side} />
     </section>
   );
 }

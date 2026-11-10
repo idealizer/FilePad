@@ -36,7 +36,7 @@ export function FileList({ side }: { side: Side }) {
           <button data-active={panel.sortKey === "type"} onClick={() => setSort(side, "type")}>Type</button>
         </div>
       )}
-      <div ref={parent} className="min-h-0 flex-1 overflow-auto">
+      <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
         {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
         {!panel.error && !panel.loading && rows.length === 0 && <div className="px-3 py-6 text-center text-[var(--muted)]">This folder is empty.</div>}

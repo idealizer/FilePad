@@ -10,7 +10,8 @@ import { StatusBar } from "./components/StatusBar";
 import { TerminalDrawer } from "./components/TerminalDrawer";
 import { ToastHost } from "./components/Toast";
 import { Toolbar } from "./components/Toolbar";
-import { inTauri, isTyping, setWindowTitle } from "./lib/platform";
+import { iconColumns } from "./components/IconView";
+import { inTauri, invoke, isTyping, message, setWindowTitle } from "./lib/platform";
 import { actionSide, useApp } from "./stores/appStore";
 import type { CmdChunk, ThemeMode, TransferProgress } from "./types";
 
@@ -21,7 +22,7 @@ function SplitPanels() {
   const left = useRef<HTMLDivElement>(null);
   const ratio = useRef(split);
   return (
-    <div ref={frame} className="flex min-h-0 flex-1 p-1">
+    <div ref={frame} className="flex min-h-0 min-w-0 flex-1 p-1">
       <div ref={left} className="flex min-w-0" style={{ flex: `0 0 ${split * 100}%` }}>
         <Panel side="left" />
       </div>
@@ -61,6 +62,16 @@ function SplitPanels() {
   );
 }
 
+function iconStep(store: ReturnType<typeof useApp.getState>, dir: 1 | -1) {
+  const side = actionSide(store);
+  if (store.panels[side].view !== "icons") return dir;
+  return dir * iconColumns(side);
+}
+
+function panelView(store: ReturnType<typeof useApp.getState>) {
+  return store.panels[actionSide(store)].view;
+}
+
 function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" {
   if (theme === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   return theme;
@@ -76,6 +87,10 @@ export default function App() {
   const leftView = useApp((state) => state.panels.left.view);
   const rightView = useApp((state) => state.panels.right.view);
   const showHidden = useApp((state) => state.showHidden);
+  const iconColors = useApp((state) => state.iconColors);
+  const iconTints = useApp((state) => state.iconTints);
+  const leftHistoryAt = useApp((state) => state.panels.left.historyAt);
+  const rightHistoryAt = useApp((state) => state.panels.right.historyAt);
   const recent = useApp((state) => state.recent);
   const commandHistory = useApp((state) => state.commandHistory);
   const split = useApp((state) => state.split);
@@ -107,19 +122,30 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
+  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
 
   useEffect(() => {
     if (!inTauri()) return;
     let unlistenCmd: (() => void) | undefined;
     let unlistenTransfer: (() => void) | undefined;
     let unlistenDrop: (() => void) | undefined;
+    let unlistenBridge: (() => void) | undefined;
     let cancel = false;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       const { getCurrentWebview } = await import("@tauri-apps/api/webview");
       const cmd = await listen<CmdChunk>("cmd-output", (event) => useApp.getState().onCmd(event.payload));
       const transfer = await listen<TransferProgress>("transfer-progress", (event) => useApp.getState().onTransfer(event.payload));
+      const bridge = await listen<{ id: string; name: string; arguments?: Record<string, unknown> }>("bridge-request", (event) => {
+        void (async () => {
+          try {
+            const result = await useApp.getState().applyBridge(event.payload.name, event.payload.arguments ?? {});
+            await invoke("bridge_reply", { id: event.payload.id, ok: true, result, error: null });
+          } catch (error) {
+            await invoke("bridge_reply", { id: event.payload.id, ok: false, result: null, error: message(error) });
+          }
+        })();
+      });
       const drop = await getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type !== "drop") return;
         const state = useApp.getState();
@@ -129,17 +155,20 @@ export default function App() {
         cmd();
         transfer();
         drop();
+        bridge();
         return;
       }
       unlistenCmd = cmd;
       unlistenTransfer = transfer;
       unlistenDrop = drop;
+      unlistenBridge = bridge;
     })();
     return () => {
       cancel = true;
       unlistenCmd?.();
       unlistenTransfer?.();
       unlistenDrop?.();
+      unlistenBridge?.();
     };
   }, []);
 
@@ -174,8 +203,14 @@ export default function App() {
       if (key === "F4") { event.preventDefault(); void store.openCurrent(); return; }
       if (key === "F5") { event.preventDefault(); void store.copyToOther(); return; }
       if (key === "F6") { event.preventDefault(); void store.moveToOther(); return; }
-      if (key === "F7") { event.preventDefault(); store.askMkdir(); return; }
+      if (key === "F7") { event.preventDefault(); if (event.shiftKey) store.askMkfile(); else store.askMkdir(); return; }
       if (key === "F8") { event.preventDefault(); store.askDelete(); return; }
+      if (event.altKey && key === "Enter") { event.preventDefault(); store.askProperties(); return; }
+      if (event.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) {
+        event.preventDefault();
+        void store.goHistory(store.active, key === "ArrowLeft" ? -1 : 1);
+        return;
+      }
       if (mod && key.toLowerCase() === "k") { event.preventDefault(); store.setPalette(true); return; }
       if (mod && (key === "`" || event.code === "Backquote")) { event.preventDefault(); store.toggleTerminal(); return; }
       if (key === "Escape") {
@@ -194,8 +229,10 @@ export default function App() {
         document.querySelector<HTMLInputElement>(`[data-panel="${store.active}"] .fp-filter`)?.focus();
         return;
       }
-      if (key === "ArrowDown") { event.preventDefault(); store.moveCursor(1, event.shiftKey); return; }
-      if (key === "ArrowUp") { event.preventDefault(); store.moveCursor(-1, event.shiftKey); return; }
+      if (key === "ArrowDown") { event.preventDefault(); store.moveCursor(iconStep(store, 1), event.shiftKey); return; }
+      if (key === "ArrowUp") { event.preventDefault(); store.moveCursor(iconStep(store, -1), event.shiftKey); return; }
+      if (key === "ArrowLeft" && panelView(store) === "icons") { event.preventDefault(); store.moveCursor(-1, event.shiftKey); return; }
+      if (key === "ArrowRight" && panelView(store) === "icons") { event.preventDefault(); store.moveCursor(1, event.shiftKey); return; }
       if (key === "PageDown") { event.preventDefault(); store.moveCursor(12, event.shiftKey); return; }
       if (key === "PageUp") { event.preventDefault(); store.moveCursor(-12, event.shiftKey); return; }
       if (key === "Home") { event.preventDefault(); store.moveCursor(-100000, false); return; }
@@ -215,7 +252,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-full flex-col bg-[var(--bg)] text-[var(--text)]">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden bg-[var(--bg)] text-[var(--text)]">
       <Toolbar />
       <SplitPanels />
       <CommandLine />

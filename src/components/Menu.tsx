@@ -20,15 +20,15 @@ export function Dropdown({
     node.style.right = align === "end" ? "0" : "auto";
     node.style.maxWidth = `${window.innerWidth - margin * 2}px`;
     const box = node.getBoundingClientRect();
-    if (box.right > window.innerWidth - margin) {
+    if (align !== "end" && box.right > window.innerWidth - margin) {
       node.style.left = "auto";
       node.style.right = "0";
     }
-    const flipped = node.getBoundingClientRect();
-    if (flipped.left < margin && node.parentElement) {
-      const parentLeft = node.parentElement.getBoundingClientRect().left;
-      node.style.right = "auto";
-      node.style.left = `${margin - parentLeft}px`;
+    const placed = node.getBoundingClientRect();
+    if (placed.left < margin) {
+      node.style.left = "auto";
+      node.style.right = "0";
+      node.style.maxWidth = `${Math.max(160, placed.right - margin)}px`;
     }
   }, [open, align]);
   useEffect(() => {

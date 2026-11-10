@@ -1,21 +1,36 @@
-import { useMemo, useRef, useState } from "react";
-import { baseName } from "../lib/format";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { baseName, displayPath, formatBytes, formatWhen, isPackedPath, isRemotePath, isStillImage } from "../lib/format";
+import { defaultIconColor, FileIcon, iconCatalog } from "../lib/fileIcon";
 import { planNames, templateChoices, type NameTemplate } from "../lib/names";
+import { invoke, message } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
+import type { ItemDetails } from "../types";
+import { HostKeyDialog, McpToolDialog, ServersDialog, SftpDialog, SftpOfferDialog } from "./RemoteDialogs";
 
 export function ModalHost() {
   const modal = useApp((state) => state.modal);
   if (!modal) return null;
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 p-6">
-      <div className={`w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl ${modal.type === "renameMany" ? "max-w-xl" : "max-w-md"}`}>
+      <div className={`w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl ${modal.type === "renameMany" || modal.type === "properties" || modal.type === "sftp" || modal.type === "servers" ? "max-w-xl" : "max-w-md"}`}>
         {modal.type === "delete" && <DeleteDialog />}
         {modal.type === "mkdir" && <NameDialog key="mkdir" title="New folder" label="Folder name" action="Create" onSubmit={(name) => void useApp.getState().confirmMkdir(name)} />}
+        {modal.type === "mkfile" && <NameDialog key="mkfile" title="New file" label="File name" action="Create" initial="untitled.txt" onSubmit={(name) => void useApp.getState().confirmMkfile(name)} />}
+        {modal.type === "about" && <AboutDialog />}
+        {modal.type === "colors" && <ColorsDialog />}
         {modal.type === "rename" && <NameDialog key={modal.path} title="Rename" label="New name" action="Rename" initial={modal.name} onSubmit={(name) => void useApp.getState().confirmRename(name)} />}
         {modal.type === "renameMany" && <PatternDialog />}
         {modal.type === "zip" && <NameDialog key={modal.name} title="Send to zip" label="Zip name" action="Create" initial={modal.name} onSubmit={(name) => void useApp.getState().confirmZip(name)} />}
+        {modal.type === "convert" && <ConvertDialog key={modal.paths.join("|")} />}
+        {modal.type === "properties" && <PropertiesDialog key={modal.paths.join("|")} />}
         {modal.type === "overwrite" && <OverwriteDialog />}
+        {modal.type === "sftp" && <SftpDialog />}
+        {modal.type === "hostKey" && <HostKeyDialog />}
+        {modal.type === "sftpOffer" && <SftpOfferDialog />}
+        {modal.type === "servers" && <ServersDialog />}
+        {(modal.type === "mcpTool" || modal.type === "mcpConfirm") && <McpToolDialog />}
       </div>
     </div>
   );
@@ -27,9 +42,17 @@ function DeleteDialog() {
   const confirmDelete = useApp((state) => state.confirmDelete);
   if (modal?.type !== "delete") return null;
   const shown = modal.paths.slice(0, 8).map(baseName);
+  const remote = modal.paths.every(isRemotePath);
+  const local = modal.paths.every((path) => !isRemotePath(path));
+  const note = remote
+    ? "This is removed from the server and cannot be undone."
+    : local
+      ? "This goes to the Recycle Bin."
+      : "Local items go to the Recycle Bin. Server items are removed and cannot be undone.";
   return (
     <>
       <h2 className="text-base font-semibold">Delete {modal.paths.length === 1 ? "this item" : `${modal.paths.length} items`}?</h2>
+      <p className="mt-2 text-sm text-[var(--muted)]">{note}</p>
       <ul className="mt-3 max-h-40 overflow-auto text-sm text-[var(--muted)]">
         {modal.paths.slice(0, 8).map((path) => <li key={path} className="truncate">{baseName(path)}</li>)}
         {modal.paths.length > shown.length && <li>and {modal.paths.length - shown.length} more</li>}
@@ -40,6 +63,200 @@ function DeleteDialog() {
       </div>
     </>
   );
+}
+
+function AboutDialog() {
+  const closeModal = useApp((state) => state.closeModal);
+  return (
+    <>
+      <h2 className="text-base font-semibold">FilePad</h2>
+      <p className="mt-2 text-sm">A two-panel file commander.</p>
+      <p className="mt-3 text-sm text-[var(--muted)]">by Content Factory OÜ</p>
+      <div className="mt-4 flex justify-end">
+        <button className="btn primary" onClick={closeModal}>Close</button>
+      </div>
+    </>
+  );
+}
+
+function ColorsDialog() {
+  const closeModal = useApp((state) => state.closeModal);
+  const iconColors = useApp((state) => state.iconColors);
+  const iconTints = useApp((state) => state.iconTints);
+  const toggleIconColors = useApp((state) => state.toggleIconColors);
+  const setIconTint = useApp((state) => state.setIconTint);
+  const resetIconTints = useApp((state) => state.resetIconTints);
+  const [manage, setManage] = useState(false);
+  const [query, setQuery] = useState("");
+  const [ext, setExt] = useState("");
+  const [color, setColor] = useState("#3b82f6");
+  const known = new Set(iconCatalog.flatMap((group) => group.items.map((item) => item.id)));
+  const extra = Object.keys(iconTints).filter((id) => !known.has(id)).sort();
+  const needle = query.trim().toLowerCase();
+  const groups = iconCatalog
+    .map((group) => ({ ...group, items: group.items.filter((item) => !needle || item.id.includes(needle) || item.name.toLowerCase().includes(needle)) }))
+    .filter((group) => group.items.length);
+  const extraShown = extra.filter((id) => !needle || id.includes(needle));
+
+  const add = () => {
+    const id = ext.trim().toLowerCase().replace(/^\./, "");
+    if (!/^[a-z0-9]{1,12}$/.test(id) || id === "folder") {
+      toast("warning", "Use an extension such as txt or pdf.");
+      return;
+    }
+    setIconTint(id, color);
+    setExt("");
+  };
+
+  return (
+    <>
+      <h2 className="text-base font-semibold">Icon colors</h2>
+      <p className="mt-1 text-sm text-[var(--muted)]">Outlines are colored for folders, documents, images, spreadsheets, slides, video, audio, code, and programs.</p>
+      <div className="fp-switch mt-4" role="group" aria-label="Icon colors">
+        <button type="button" data-active={iconColors} onClick={() => { if (!iconColors) toggleIconColors(); }}>On</button>
+        <button type="button" data-active={!iconColors} onClick={() => { if (iconColors) toggleIconColors(); }}>Off</button>
+      </div>
+      <button type="button" className="btn mt-4 w-full justify-center" aria-expanded={manage} onClick={() => setManage((open) => !open)}>
+        Manage extensions
+        {manage ? <ChevronUp /> : <ChevronDown />}
+      </button>
+      {manage && (
+        <>
+          <input className="field mt-3 h-8 w-full" placeholder="Find an extension" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <div className="mt-3 max-h-[42vh] overflow-auto pr-1">
+            {groups.map((group) => (
+              <div key={group.label} className="mb-3">
+                <div className="menu-label">{group.label}</div>
+                {group.items.map((item) => (
+                  <Swatch key={item.id} id={item.id} name={item.name} color={iconTints[item.id] ?? defaultIconColor(item.id)} custom={Boolean(iconTints[item.id])} onChange={(next) => setIconTint(item.id, next)} onReset={() => setIconTint(item.id, null)} />
+                ))}
+              </div>
+            ))}
+            {extraShown.length > 0 && (
+              <div className="mb-3">
+                <div className="menu-label">Added</div>
+                {extraShown.map((id) => (
+                  <Swatch key={id} id={id} name={id} color={iconTints[id]} custom onChange={(next) => setIconTint(id, next)} onReset={() => setIconTint(id, null)} />
+                ))}
+              </div>
+            )}
+            {!groups.length && !extraShown.length && <p className="px-2 py-3 text-sm text-[var(--muted)]">No extension matches.</p>}
+          </div>
+          <form className="mt-3 flex items-center gap-2" onSubmit={(event) => { event.preventDefault(); add(); }}>
+            <input className="field h-8 min-w-0 flex-1" placeholder="Add extension" value={ext} spellCheck={false} onChange={(event) => setExt(event.target.value)} />
+            <input className="fp-color" type="color" aria-label="Color for the new extension" value={color} onChange={(event) => setColor(event.target.value)} />
+            <button className="btn" type="submit">Add</button>
+          </form>
+        </>
+      )}
+      <div className="mt-4 flex justify-end gap-2">
+        {manage && <button className="btn" disabled={!Object.keys(iconTints).length} onClick={resetIconTints}>Reset all</button>}
+        <button className="btn primary" onClick={closeModal}>Close</button>
+      </div>
+    </>
+  );
+}
+
+function Swatch({ id, name, color, custom, onChange, onReset }: { id: string; name: string; color: string; custom: boolean; onChange: (color: string) => void; onReset: () => void }) {
+  const shown = /^#[0-9a-fA-F]{6}$/.test(color) ? color : defaultIconColor(id);
+  return (
+    <div className="flex items-center gap-2 px-2 py-1">
+      <span className="inline-flex" style={{ color: shown }}><FileIcon isDir={id === "folder"} extension={id} /></span>
+      <span className="w-16 truncate text-sm">{name}</span>
+      <input className="fp-color" type="color" aria-label={`${name} color`} value={shown} onChange={(event) => onChange(event.target.value)} />
+      <span className="w-16 font-mono text-xs text-[var(--muted)]">{shown}</span>
+      {custom ? <button type="button" className="text-xs text-[var(--muted)] hover:text-[var(--text)]" onClick={onReset}>Reset</button> : <span className="w-9" />}
+    </div>
+  );
+}
+
+function PropertiesDialog() {
+  const modal = useApp((state) => state.modal);
+  const closeModal = useApp((state) => state.closeModal);
+  const paths = modal?.type === "properties" ? modal.paths : [];
+  const [items, setItems] = useState<ItemDetails[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!paths.length) return;
+    let cancel = false;
+    void invoke<ItemDetails[]>("describe_items", { paths })
+      .then((next) => {
+        if (!cancel) setItems(next);
+      })
+      .catch((reason: unknown) => {
+        if (!cancel) setError(message(reason));
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [paths]);
+  const item = items?.length === 1 ? items[0] : null;
+  const knownCount = items?.filter((entry) => entry.sizeKnown).length ?? 0;
+  const known = items?.reduce((sum, entry) => sum + (entry.sizeKnown ? entry.size : 0), 0) ?? 0;
+  const locations = items ? [...new Set(items.map((entry) => entry.location))] : [];
+  return (
+    <>
+      <h2 className="text-base font-semibold">Properties</h2>
+      <div className="mt-3">
+        {error && <p className="text-sm text-[var(--muted)]">{error}</p>}
+        {!error && !items && <p className="text-sm text-[var(--muted)]">Reading…</p>}
+        {item && (
+          <>
+            <Property label="Name" value={item.name} />
+            <Property label="Path" value={displayPath(item.path)} />
+            <Property label="Type" value={item.kind} />
+            <Property label="Size" value={item.sizeKnown ? formatBytes(item.size) : "—"} />
+            {item.counted && <Property label="Contains" value={contains(item)} />}
+            <Property label="Modified" value={when(item.modified)} />
+            <Property label="Created" value={when(item.created)} />
+            <Property label="Accessed" value={when(item.accessed)} />
+            <Property label="Attributes" value={attributes(item)} />
+          </>
+        )}
+        {items && items.length > 1 && (
+          <>
+            <Property label="Items" value={`${items.length} selected`} />
+            <Property label="Files" value={String(items.filter((entry) => !entry.isDir).length)} />
+            <Property label="Folders" value={String(items.filter((entry) => entry.isDir).length)} />
+            <Property label="Size" value={knownCount ? formatBytes(known) : "—"} />
+            <Property label="Location" value={locations.length === 1 ? displayPath(locations[0]) : "More than one folder"} />
+          </>
+        )}
+      </div>
+      <div className="mt-4 flex justify-end">
+        <button className="btn primary" onClick={closeModal}>Close</button>
+      </div>
+    </>
+  );
+}
+
+function Property({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3 border-b border-[var(--border)] py-1.5 text-sm last:border-0">
+      <div className="text-[var(--muted)]">{label}</div>
+      <div className="break-all">{value || "—"}</div>
+    </div>
+  );
+}
+
+function contains(item: ItemDetails): string {
+  const files = `${item.files} ${item.files === 1 ? "file" : "files"}`;
+  if (item.kind === "Zip archive" || item.kind === "Gzip archive") return files;
+  const folders = `${item.folders} ${item.folders === 1 ? "folder" : "folders"}`;
+  if (!item.folders) return files;
+  if (!item.files) return folders;
+  return `${folders}, ${files}`;
+}
+
+function when(ms: number): string {
+  return formatWhen(ms) || "—";
+}
+
+function attributes(item: ItemDetails): string {
+  if (isPackedPath(item.path)) return "Inside an archive";
+  if (item.path.startsWith("sftp:")) return "On a server";
+  const flags = [item.hidden ? "Hidden" : "", item.readOnly ? "Read-only" : ""].filter(Boolean);
+  return flags.length ? flags.join(", ") : "Normal";
 }
 
 function NameDialog({ title, label, action, initial = "", onSubmit }: { title: string; label: string; action: string; initial?: string; onSubmit: (name: string) => void }) {
@@ -204,6 +421,69 @@ function PatternDialog() {
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" type="button" onClick={closeModal}>Cancel</button>
         <button className="btn primary" type="submit" disabled={!ready}>Rename</button>
+      </div>
+    </form>
+  );
+}
+
+const convertFormats = [
+  { id: "jpg", label: "JPG" },
+  { id: "png", label: "PNG" },
+  { id: "webp", label: "WebP" },
+  { id: "bmp", label: "BMP" },
+  { id: "gif", label: "GIF" },
+];
+
+function ConvertDialog() {
+  const modal = useApp((state) => state.modal);
+  const closeModal = useApp((state) => state.closeModal);
+  const [format, setFormat] = useState("jpg");
+  const [quality, setQuality] = useState(85);
+  const [background, setBackground] = useState<"white" | "black">("white");
+  const [replace, setReplace] = useState(false);
+  if (modal?.type !== "convert") return null;
+  const pictures = modal.paths.filter(isStillImage);
+  const gif = pictures.some((path) => path.toLowerCase().endsWith(".gif"));
+  const lossy = format === "jpg" || format === "bmp";
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void useApp.getState().confirmConvert(format, quality, background, replace);
+      }}
+    >
+      <h2 className="text-base font-semibold">Convert {pictures.length === 1 ? "picture" : `${pictures.length} pictures`}</h2>
+      {pictures.length !== modal.paths.length && <p className="mt-2 text-sm text-[var(--muted)]">Other selected files are left as they are.</p>}
+      <div className="seg mt-3 flex-wrap">
+        {convertFormats.map((item) => (
+          <button key={item.id} type="button" data-active={format === item.id} onClick={() => setFormat(item.id)}>{item.label}</button>
+        ))}
+      </div>
+      {format === "jpg" && (
+        <label className="mt-3 flex items-center gap-2 text-sm text-[var(--muted)]">
+          Quality
+          <input className="min-w-0 flex-1" type="range" min={1} max={100} value={quality} onChange={(event) => setQuality(Number(event.target.value))} />
+          <span className="w-8 text-right text-[var(--text)]">{quality}</span>
+        </label>
+      )}
+      {lossy && (
+        <div className="mt-3 flex items-center gap-2 text-sm">
+          <span className="text-[var(--muted)]">Background</span>
+          <span className="seg">
+            <button type="button" data-active={background === "white"} onClick={() => setBackground("white")}>White</button>
+            <button type="button" data-active={background === "black"} onClick={() => setBackground("black")}>Black</button>
+          </span>
+        </div>
+      )}
+      {gif && <p className="mt-3 text-sm text-[var(--muted)]">Animated GIFs become a single frame.</p>}
+      {(format === "png" || format === "webp") && <p className="mt-3 text-sm text-[var(--muted)]">This keeps every pixel. Photos are often larger than a JPG.</p>}
+      <label className="mt-3 flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={replace} onChange={(event) => setReplace(event.target.checked)} />
+        Replace files that are already there
+      </label>
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn" type="button" onClick={closeModal}>Cancel</button>
+        <button className="btn primary" type="submit">Convert</button>
       </div>
     </form>
   );

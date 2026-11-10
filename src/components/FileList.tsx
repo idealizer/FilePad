@@ -14,7 +14,7 @@ export function FileList({ side }: { side: Side }) {
   const clickEntry = useApp((state) => state.clickEntry);
   const toggleMark = useApp((state) => state.toggleMark);
   const markRange = useApp((state) => state.markRange);
-  const openEntry = useApp((state) => state.openEntry);
+  const openCurrent = useApp((state) => state.openCurrent);
   const setSort = useApp((state) => state.setSort);
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
@@ -70,7 +70,7 @@ export function FileList({ side }: { side: Side }) {
                     return markedPaths.includes(path) ? markedPaths : [path];
                   });
                 }}
-                onDoubleClick={() => void openEntry()}
+                onDoubleClick={() => void openCurrent()}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   event.stopPropagation();

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { archiveFile, baseName, canExtract, diskFolder, isPackedPath, isRemotePath, isStillImage, joinPath, remoteParts } from "../lib/format";
+import { iconSizeOf } from "../lib/iconSize";
 import type { NameSource, NameTemplate } from "../lib/names";
 import { fileRows, treeRows } from "../lib/rows";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
@@ -129,6 +130,7 @@ interface AppState {
   panels: { left: Panel; right: Panel };
   showHidden: boolean;
   iconColors: boolean;
+  iconSize: number;
   iconTints: Record<string, string>;
   places: Place[];
   recent: string[];
@@ -210,6 +212,7 @@ interface AppState {
   openInTextpad: () => Promise<void>;
   previewOther: () => void;
   toggleHidden: () => void;
+  setIconSize: (size: number) => void;
   toggleIconColors: () => void;
   askColors: () => void;
   setIconTint: (id: string, color: string | null) => void;
@@ -242,6 +245,7 @@ export const useApp = create<AppState>((set, get) => ({
   panels: { left: emptyPanel(), right: emptyPanel() },
   showHidden: false,
   iconColors: true,
+  iconSize: 112,
   iconTints: {},
   places: [],
   recent: [],
@@ -286,6 +290,7 @@ export const useApp = create<AppState>((set, get) => ({
       theme: session.theme,
       showHidden: session.showHidden,
       iconColors: session.iconColors,
+      iconSize: iconSizeOf(session.iconSize),
       iconTints: storedTints(session.iconTints),
       recent: session.recent,
       commandHistory: session.commandHistory,
@@ -327,6 +332,7 @@ export const useApp = create<AppState>((set, get) => ({
       rightView: state.panels.right.view,
       showHidden: state.showHidden,
       iconColors: state.iconColors,
+      iconSize: state.iconSize,
       iconTints: state.iconTints,
       leftHistory: state.panels.left.history,
       rightHistory: state.panels.right.history,
@@ -1012,6 +1018,7 @@ export const useApp = create<AppState>((set, get) => ({
     get().setView(side, "preview");
   },
 
+  setIconSize: (size) => set({ iconSize: iconSizeOf(size) }),
   toggleHidden: () => set((state) => ({ showHidden: !state.showHidden })),
   toggleIconColors: () => set((state) => ({ iconColors: !state.iconColors })),
   askColors: () => set({ paletteOpen: false, contextMenu: null, modal: { type: "colors" } }),

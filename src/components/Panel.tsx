@@ -1,7 +1,8 @@
 import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, LayoutGrid, List, MemoryStick, Monitor, Network, Search, Usb } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useDragSession } from "../lib/drag";
 import { displayPath, isRemotePath, storePath } from "../lib/format";
+import { ICON_MAX, ICON_MIN } from "../lib/iconSize";
 import { fileRows } from "../lib/rows";
 import { useApp } from "../stores/appStore";
 import type { Side, ViewMode } from "../types";
@@ -166,6 +167,7 @@ export function Panel({ side }: { side: Side }) {
             </button>
           ))}
         </div>
+        {panel.view === "icons" && <IconSize />}
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2 top-1.5 h-3.5 w-3.5 text-[var(--muted)]" />
           <input className="field fp-filter h-7 w-full pl-7" placeholder="Filter" value={panel.filter} onChange={(event) => setFilter(side, event.target.value)} />
@@ -174,5 +176,24 @@ export function Panel({ side }: { side: Side }) {
       {panel.view === "preview" ? <PreviewPane side={side} /> : panel.view === "tree" ? <DirTree side={side} /> : panel.view === "icons" ? <IconView side={side} /> : <FileList side={side} />}
       <PanelStatus side={side} />
     </section>
+  );
+}
+
+function IconSize() {
+  const size = useApp((state) => state.iconSize);
+  const setIconSize = useApp((state) => state.setIconSize);
+  return (
+    <input
+      className="fp-icon-size"
+      style={{ "--fp-icon-fill": `${((size - ICON_MIN) / (ICON_MAX - ICON_MIN)) * 100}%` } as CSSProperties}
+      type="range"
+      min={ICON_MIN}
+      max={ICON_MAX}
+      step={4}
+      value={size}
+      aria-label="Icon size"
+      data-tip={`Icon size ${size}`}
+      onChange={(event) => setIconSize(Number(event.target.value))}
+    />
   );
 }

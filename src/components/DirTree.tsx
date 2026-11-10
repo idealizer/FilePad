@@ -14,7 +14,7 @@ export function DirTree({ side }: { side: Side }) {
   const setActive = useApp((state) => state.setActive);
   const clickEntry = useApp((state) => state.clickEntry);
   const toggleTree = useApp((state) => state.toggleTree);
-  const openEntry = useApp((state) => state.openEntry);
+  const openCurrent = useApp((state) => state.openCurrent);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
   const rows = treeRows(panel, showHidden);
@@ -49,7 +49,7 @@ export function DirTree({ side }: { side: Side }) {
                 const path = row.path;
                 armDrag(event, () => [path]);
               }}
-              onDoubleClick={() => void openEntry()}
+              onDoubleClick={() => void openCurrent()}
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();

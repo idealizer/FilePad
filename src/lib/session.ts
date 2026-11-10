@@ -10,6 +10,7 @@ export interface SessionData {
   rightView: ViewMode;
   showHidden: boolean;
   iconColors: boolean;
+  iconSize: number;
   iconTints: Record<string, string>;
   leftHistory: string[];
   rightHistory: string[];
@@ -34,6 +35,7 @@ export function defaultSession(): SessionData {
     rightView: "details",
     showHidden: false,
     iconColors: true,
+    iconSize: 112,
     iconTints: {},
     leftHistory: [],
     rightHistory: [],

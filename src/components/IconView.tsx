@@ -1,14 +1,13 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { armDrag, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
+import { iconMetrics } from "../lib/iconSize";
 import { fileRows, type Row } from "../lib/rows";
 import { invoke } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
 
-const CELL = 112;
-const ROW = 124;
 const pictures = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
 const thumbs = new Map<string, string>();
 
@@ -29,18 +28,20 @@ export function IconView({ side }: { side: Side }) {
   const clickEntry = useApp((state) => state.clickEntry);
   const toggleMark = useApp((state) => state.toggleMark);
   const markRange = useApp((state) => state.markRange);
-  const openEntry = useApp((state) => state.openEntry);
+  const openCurrent = useApp((state) => state.openCurrent);
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
+  const iconSize = useApp((state) => state.iconSize);
   const drag = useDragSession();
   const rows = fileRows(panel, showHidden);
   const parent = useRef<HTMLDivElement>(null);
+  const metrics = iconMetrics(iconSize);
   const [across, setAcross] = useState(4);
   useEffect(() => {
     const node = parent.current;
     if (!node) return;
     const measure = () => {
-      const next = Math.max(1, Math.floor(node.clientWidth / CELL));
+      const next = Math.max(1, Math.floor(node.clientWidth / metrics.cell));
       setAcross(next);
       setIconColumns(side, next);
     };
@@ -48,21 +49,40 @@ export function IconView({ side }: { side: Side }) {
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [side]);
+  }, [side, metrics.cell]);
+  useEffect(() => {
+    const node = parent.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const state = useApp.getState();
+      state.setIconSize(state.iconSize + (event.deltaY < 0 ? 8 : -8));
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, []);
   const lineCount = Math.ceil(rows.length / across);
-  const virtualizer = useVirtualizer({ count: lineCount, getScrollElement: () => parent.current, estimateSize: () => ROW, overscan: 4 });
+  const virtualizer = useVirtualizer({ count: lineCount, getScrollElement: () => parent.current, estimateSize: () => metrics.row, overscan: 4 });
+  useEffect(() => {
+    virtualizer.measure();
+  }, [metrics.row, virtualizer]);
   useEffect(() => {
     if (rows.length) virtualizer.scrollToIndex(Math.floor(panel.cursor / across), { align: "auto" });
   }, [panel.cursor, rows.length, across, virtualizer]);
 
   return (
-    <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+    <div
+      ref={parent}
+      className="fp-icons min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
+      style={{ "--fp-icon": `${metrics.cell}px`, "--fp-glyph": `${metrics.glyph}px` } as CSSProperties}
+    >
       {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
       {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
       {!panel.error && !panel.loading && rows.length === 0 && <div className="px-3 py-6 text-center text-[var(--muted)]">This folder is empty.</div>}
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((line) => (
-          <div key={line.key} className="fp-icon-row" style={{ position: "absolute", top: 0, left: 0, width: "100%", height: ROW, transform: `translateY(${line.start}px)` }}>
+          <div key={line.key} className="fp-icon-row" style={{ position: "absolute", top: 0, left: 0, width: "100%", height: metrics.row, transform: `translateY(${line.start}px)` }}>
             {rows.slice(line.index * across, line.index * across + across).map((row, offset) => {
               const index = line.index * across + offset;
               const marked = panel.marked.includes(row.path);
@@ -75,6 +95,7 @@ export function IconView({ side }: { side: Side }) {
                   data-drop={Boolean(drag && row.isDir && drag.over === row.path)}
                   data-drop-path={row.up ? panel.parent ?? panel.path : row.isDir ? row.path : panel.path}
                   title={row.name}
+                  onDragStart={(event) => event.preventDefault()}
                   onMouseDown={(event) => {
                     setActive(side);
                     if (event.shiftKey) markRange(side, index);
@@ -89,7 +110,7 @@ export function IconView({ side }: { side: Side }) {
                       return markedPaths.includes(path) ? markedPaths : [path];
                     });
                   }}
-                  onDoubleClick={() => void openEntry()}
+                  onDoubleClick={() => void openCurrent()}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -139,5 +160,5 @@ function Picture({ path, row }: { path: string; row: Row }) {
     };
   }, [path]);
   if (!src) return <FileIcon isDir={row.isDir} extension={row.extension} />;
-  return <img src={src} alt="" />;
+  return <img src={src} alt="" draggable={false} />;
 }

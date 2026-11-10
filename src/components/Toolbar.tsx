@@ -45,7 +45,7 @@ export function Toolbar() {
       <span className="tb-sep" />
       <button className="tb-btn" data-tip="Preview in the other panel (F3)" onClick={previewOther}><Eye /></button>
       <button className="tb-btn" data-active={showHidden} data-tip={showHidden ? "Hidden files are visible" : "Hidden files are off"} onClick={toggleHidden}><Ghost /></button>
-      <button className="tb-btn" data-active={iconColors} data-tip="Icon colors" onClick={askColors}><Palette /></button>
+      <button className="tb-btn" data-tip={iconColors ? "Icon colors" : "Icon colors are off"} onClick={askColors}><span className={iconColors ? undefined : "fp-strike"}><Palette /></span></button>
       <button className="tb-btn" data-active={terminalOpen} data-tip={`Terminal (${keys("Ctrl+`")})`} onClick={toggleTerminal}><Terminal /></button>
       <span className="flex-1" />
       <button className="tb-btn" data-tip={`Commands (${keys("Ctrl+K")})`} onClick={() => setPalette(true)}><Command /></button>

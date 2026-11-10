@@ -1,6 +1,6 @@
 import DOMPurify from "dompurify";
-import { ChevronLeft, ChevronRight, ClipboardCopy, Crop, FlipHorizontal, FlipVertical, FolderOpen, FolderOutput, FolderSearch, Mail, Printer, Replace, RotateCcw, RotateCw, Save, Share2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight, ClipboardCopy, Crop, FileText, FlipHorizontal, FlipVertical, FolderOpen, FolderOutput, FolderSearch, Mail, Printer, Replace, RotateCcw, RotateCw, Save, Share2, Table2 } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { baseName, formatBytes, formatWhen, isPackedPath, typeLabel } from "../lib/format";
 import { fileRows, treeRows } from "../lib/rows";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
@@ -29,6 +29,13 @@ export function PreviewPane({ side }: { side: Side }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
+  const [tableOn, setTableOn] = useState(true);
+  const filePath = file?.path ?? "";
+  const [tablePath, setTablePath] = useState(filePath);
+  if (tablePath !== filePath) {
+    setTablePath(filePath);
+    setTableOn(true);
+  }
 
   useEffect(() => {
     if (!file) {
@@ -59,6 +66,12 @@ export function PreviewPane({ side }: { side: Side }) {
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
         <span className="min-w-0 flex-1 truncate">{file ? file.name : row?.name ?? "Preview"}</span>
         {file && <span className="text-xs text-[var(--muted)]">{formatBytes(file.size)}</span>}
+        {preview?.kind === "csv" && (
+          <div className="seg" role="tablist" aria-label="CSV view">
+            <button data-active={!tableOn} data-tip="Text" onClick={() => setTableOn(false)}><FileText />Text</button>
+            <button data-active={tableOn} data-tip="Table" onClick={() => setTableOn(true)}><Table2 />Table</button>
+          </div>
+        )}
         {file && <PreviewActions path={file.path} extension={file.extension} />}
         {file && <button className="tb-btn" data-tip="Open" onClick={() => void openExternal(file.path).catch((reason: unknown) => toast("error", message(reason)))}><FolderOpen /></button>}
         {file && textpad && (preview?.kind === "text" || preview?.kind === "csv") && (
@@ -72,7 +85,7 @@ export function PreviewPane({ side }: { side: Side }) {
         {!treeRow && row?.isDir && !row.up && <ListingView listPath={row.path} source={source} />}
         {file && loading && <Empty text="Reading…" />}
         {file && error && <Empty text={error} />}
-        {file && !loading && preview && <Body preview={preview} source={source} theme={theme} onSaved={() => setTick((value) => value + 1)} />}
+        {file && !loading && preview && <Body preview={preview} source={source} theme={theme} tableOn={tableOn} onSaved={() => setTick((value) => value + 1)} />}
       </div>
     </div>
   );
@@ -125,7 +138,7 @@ function Empty({ text }: { text: string }) {
   return <div className="flex h-full items-center justify-center px-6 text-center text-[var(--muted)]">{text}</div>;
 }
 
-function Body({ preview, source, theme, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; onSaved: () => void }) {
+function Body({ preview, source, theme, tableOn, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; tableOn: boolean; onSaved: () => void }) {
   if (preview.kind === "image" && preview.dataBase64) return <ImageView key={preview.path} preview={preview} source={source} onSaved={onSaved} />;
   if (preview.kind === "audio" || preview.kind === "video") return <MediaView preview={preview} />;
   if (preview.kind === "zip") return <ZipView path={preview.path} source={source} />;
@@ -135,7 +148,10 @@ function Body({ preview, source, theme, onSaved }: { preview: PreviewFile; sourc
   if (preview.kind === "text" && preview.text !== null) {
     return <CodeView text={preview.text} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
   }
-  if (preview.kind === "csv" && preview.text !== null) return <CsvTable text={preview.text} delimiter={preview.extension === "tsv" ? "\t" : ","} />;
+  if (preview.kind === "csv" && preview.text !== null) {
+    if (!tableOn) return <CodeView text={preview.text} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
+    return <CsvTable text={preview.text} delimiter={preview.extension === "tsv" ? "\t" : ","} truncated={preview.truncated} />;
+  }
   if (preview.kind === "pdf" && (preview.dataBase64 || !isPackedPath(preview.path))) return <PdfView data={preview.dataBase64} path={preview.path} />;
   if (preview.kind === "docx" && preview.dataBase64) return <DocxView data={preview.dataBase64} />;
   if (preview.kind === "xlsx" && preview.dataBase64) return <XlsxView data={preview.dataBase64} />;
@@ -749,6 +765,7 @@ function ListingView({ listPath, source, archive, noun = "in this folder" }: { l
   const showHidden = useApp((state) => state.showHidden);
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const drag = useColumnDrag();
   useEffect(() => {
     let cancel = false;
     setEntries(null);
@@ -776,7 +793,8 @@ function ListingView({ listPath, source, archive, noun = "in this folder" }: { l
         <span className="text-xs text-[var(--muted)]">{visible.length} items {noun}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="fp-table">
+        <table className={drag.widths ? "fp-table fp-cols" : "fp-table"} onPointerDown={drag.onPointerDown} onPointerMove={drag.onPointerMove}>
+          {drag.widths && <colgroup>{drag.widths.map((width, index) => <col key={index} style={{ width }} />)}</colgroup>}
           <tbody>
             {shown.map((entry) => (
               <tr key={entry.path}>
@@ -798,17 +816,19 @@ function ListingView({ listPath, source, archive, noun = "in this folder" }: { l
 const audioMime: Record<string, string> = { mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac" };
 const videoMime: Record<string, string> = { mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg", mov: "video/quicktime", mkv: "video/x-matroska" };
 
-function CsvTable({ text, delimiter }: { text: string; delimiter: string }) {
+function CsvTable({ text, delimiter, truncated }: { text: string; delimiter: string; truncated: boolean }) {
   const rows = parseTable(text, delimiter);
-  return <Table rows={rows} />;
+  return <Table rows={rows} truncated={truncated} />;
 }
 
-function Table({ rows }: { rows: string[][] }) {
+function Table({ rows, truncated = false }: { rows: string[][]; truncated?: boolean }) {
   const shown = rows.slice(0, 200);
   const width = Math.min(20, shown.reduce((max, row) => Math.max(max, row.length), 0));
+  const drag = useColumnDrag();
   return (
     <div className="h-full overflow-auto">
-      <table className="fp-table">
+      <table className={drag.widths ? "fp-table fp-cols" : "fp-table"} onPointerDown={drag.onPointerDown} onPointerMove={drag.onPointerMove}>
+        {drag.widths && <colgroup>{drag.widths.map((column, index) => <col key={index} style={{ width: column }} />)}</colgroup>}
         <tbody>
           {shown.map((row, index) => (
             <tr key={index}>
@@ -818,6 +838,7 @@ function Table({ rows }: { rows: string[][] }) {
         </tbody>
       </table>
       {rows.length > shown.length && <div className="px-3 py-2 text-xs text-[var(--muted)]">Showing the first {shown.length} rows.</div>}
+      {truncated && <div className="px-3 py-2 text-xs text-[var(--muted)]">Preview stopped at 8 MB</div>}
     </div>
   );
 }
@@ -872,8 +893,14 @@ function PdfView({ data, path }: { data: string | null; path: string }) {
 }
 
 function DocxView({ data }: { data: string }) {
+  const host = useRef<HTMLDivElement>(null);
   const [html, setHtml] = useState("");
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const node = host.current;
+    if (!node || !html) return;
+    return bindColumnResize(node);
+  }, [html]);
   useEffect(() => {
     let cancel = false;
     void (async () => {
@@ -893,7 +920,7 @@ function DocxView({ data }: { data: string }) {
   }, [data]);
   if (error) return <Empty text={error} />;
   if (!html) return <Empty text="Reading…" />;
-  return <div className="fp-doc" dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={host} className="fp-doc" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 function XlsxView({ data }: { data: string }) {
@@ -919,6 +946,122 @@ function XlsxView({ data }: { data: string }) {
   if (error) return <Empty text={error} />;
   if (!rows) return <Empty text="Reading…" />;
   return <Table rows={rows} />;
+}
+
+const COLUMN_EDGE = 6;
+
+function columnEdge(event: PointerEvent): { index: number } | null {
+  const target = event.target;
+  if (!(target instanceof Element)) return null;
+  const cell = target.closest("td, th");
+  const table = cell?.closest("table");
+  if (!(cell instanceof HTMLTableCellElement) || !(table instanceof HTMLTableElement)) return null;
+  if (table.closest(".fp-slide")) return null;
+  const rect = cell.getBoundingClientRect();
+  if (event.clientX >= rect.right - COLUMN_EDGE) return { index: cell.cellIndex };
+  if (event.clientX <= rect.left + COLUMN_EDGE && cell.cellIndex > 0) return { index: cell.cellIndex - 1 };
+  return null;
+}
+
+function measureColumns(table: HTMLTableElement): number[] {
+  const row = [...table.rows].find((item) => item.cells.length);
+  if (!row) return [];
+  return [...row.cells].map((cell) => Math.max(48, Math.round(cell.getBoundingClientRect().width)));
+}
+
+function useColumnDrag() {
+  const [widths, setWidths] = useState<number[] | null>(null);
+  const onPointerDown = (event: ReactPointerEvent<HTMLTableElement>) => {
+    if (event.button !== 0) return;
+    const hit = columnEdge(event.nativeEvent);
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const base = widths ?? measureColumns(event.currentTarget);
+    const startW = base[hit.index] ?? 96;
+    const startX = event.clientX;
+    const index = hit.index;
+    const move = (ev: PointerEvent) => {
+      const next = base.slice();
+      next[index] = Math.max(48, Math.round(startW + ev.clientX - startX));
+      setWidths(next);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("fp-col-resize");
+    };
+    document.body.classList.add("fp-col-resize");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLTableElement>) => {
+    if (document.body.classList.contains("fp-col-resize")) return;
+    event.currentTarget.style.cursor = columnEdge(event.nativeEvent) ? "col-resize" : "";
+  };
+  return { widths, onPointerDown, onPointerMove };
+}
+
+function bindColumnResize(root: HTMLElement) {
+  let drag: { index: number; startX: number; startW: number; widths: number[]; table: HTMLTableElement } | null = null;
+  let hot: HTMLElement | null = null;
+  const move = (event: PointerEvent) => {
+    if (drag) {
+      const next = drag.widths.slice();
+      next[drag.index] = Math.max(48, Math.round(drag.startW + event.clientX - drag.startX));
+      drag.widths = next;
+      applyColumnWidths(drag.table, next);
+      return;
+    }
+    const hit = columnEdge(event);
+    const cell = event.target instanceof Element ? event.target.closest("td, th") : null;
+    if (hot && hot !== cell) hot.style.cursor = "";
+    hot = cell instanceof HTMLElement ? cell : null;
+    if (hot) hot.style.cursor = hit ? "col-resize" : "";
+  };
+  const down = (event: PointerEvent) => {
+    if (event.button !== 0 || drag) return;
+    const hit = columnEdge(event);
+    const table = event.target instanceof Element ? event.target.closest("table") : null;
+    if (!hit || !(table instanceof HTMLTableElement) || !root.contains(table)) return;
+    event.preventDefault();
+    const widths = columnWidths(table);
+    drag = { index: hit.index, startX: event.clientX, startW: widths[hit.index] ?? 96, widths, table };
+    document.body.classList.add("fp-col-resize");
+  };
+  const up = () => {
+    drag = null;
+    document.body.classList.remove("fp-col-resize");
+  };
+  root.addEventListener("pointermove", move);
+  root.addEventListener("pointerdown", down);
+  window.addEventListener("pointerup", up);
+  return () => {
+    root.removeEventListener("pointermove", move);
+    root.removeEventListener("pointerdown", down);
+    window.removeEventListener("pointerup", up);
+    document.body.classList.remove("fp-col-resize");
+    if (hot) hot.style.cursor = "";
+  };
+}
+
+function columnWidths(table: HTMLTableElement): number[] {
+  const cols = [...table.querySelectorAll(":scope > colgroup > col")];
+  if (cols.length) return cols.map((col) => Math.round(col.getBoundingClientRect().width) || 96);
+  return measureColumns(table);
+}
+
+function applyColumnWidths(table: HTMLTableElement, widths: number[]) {
+  let group = table.querySelector(":scope > colgroup");
+  if (!group) {
+    group = document.createElement("colgroup");
+    table.insertBefore(group, table.firstChild);
+  }
+  while (group.children.length < widths.length) group.appendChild(document.createElement("col"));
+  widths.forEach((width, index) => {
+    (group.children[index] as HTMLElement).style.width = `${width}px`;
+  });
+  table.classList.add("fp-cols");
 }
 
 function parseTable(text: string, delimiter: string): string[][] {

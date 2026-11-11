@@ -697,7 +697,7 @@ fn kind_for(ext: &str) -> &'static str {
         "zip" => "zip",
         "gz" | "gzip" | "tgz" => "gz",
         "mp3" | "wav" | "ogg" | "oga" | "flac" | "m4a" | "aac" | "opus" | "wma" => "audio",
-        "mp4" | "m4v" | "webm" | "ogv" | "mov" | "mkv" => "video",
+        "mp4" | "m4v" | "webm" | "ogv" | "mov" | "mkv" | "vob" => "video",
         "7z" | "rar" | "exe" | "dll" => "binary",
         "txt" | "md" | "markdown" | "json" | "jsonl" | "log" | "xml" | "html" | "htm" | "css" | "js" | "jsx" | "ts" | "tsx" | "rs" | "py" | "toml" | "yaml" | "yml" | "ini" | "php" | "sh" | "ps1" | "bat" | "cmd" | "sql" | "c" | "h" | "cpp" | "cs" | "go" | "java" | "rb" => "text",
         _ => "auto",

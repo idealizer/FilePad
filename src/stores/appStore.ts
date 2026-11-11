@@ -131,6 +131,7 @@ interface AppState {
   showHidden: boolean;
   iconColors: boolean;
   iconSize: number;
+  keyBar: boolean;
   iconTints: Record<string, string>;
   places: Place[];
   recent: string[];
@@ -218,6 +219,7 @@ interface AppState {
   setIconTint: (id: string, color: string | null) => void;
   resetIconTints: () => void;
   toggleTerminal: () => void;
+  toggleKeyBar: () => void;
   setSplit: (split: number) => void;
   setOutputHeight: (height: number) => void;
   setTerminalHeight: (height: number) => void;
@@ -246,6 +248,7 @@ export const useApp = create<AppState>((set, get) => ({
   showHidden: false,
   iconColors: true,
   iconSize: 112,
+  keyBar: true,
   iconTints: {},
   places: [],
   recent: [],
@@ -291,6 +294,7 @@ export const useApp = create<AppState>((set, get) => ({
       showHidden: session.showHidden,
       iconColors: session.iconColors,
       iconSize: iconSizeOf(session.iconSize),
+      keyBar: session.keyBar,
       iconTints: storedTints(session.iconTints),
       recent: session.recent,
       commandHistory: session.commandHistory,
@@ -333,6 +337,7 @@ export const useApp = create<AppState>((set, get) => ({
       showHidden: state.showHidden,
       iconColors: state.iconColors,
       iconSize: state.iconSize,
+      keyBar: state.keyBar,
       iconTints: state.iconTints,
       leftHistory: state.panels.left.history,
       rightHistory: state.panels.right.history,
@@ -1031,6 +1036,7 @@ export const useApp = create<AppState>((set, get) => ({
   }),
   resetIconTints: () => set({ iconTints: {} }),
   toggleTerminal: () => set((state) => ({ terminalOpen: !state.terminalOpen })),
+  toggleKeyBar: () => set((state) => ({ keyBar: !state.keyBar })),
   setSplit: (split) => set({ split: clamp(split, 0.18, 0.82) }),
   setOutputHeight: (outputHeight) => set({ outputHeight: clamp(outputHeight, 72, 800) }),
   setTerminalHeight: (terminalHeight) => set({ terminalHeight: clamp(terminalHeight, 120, 800) }),
@@ -1107,13 +1113,18 @@ export const useApp = create<AppState>((set, get) => ({
   askServers: () => set({ contextMenu: null, paletteOpen: false, modal: { type: "servers" } }),
 
   submitSftp: async (draft, acceptFingerprint, replacePin) => {
+    const port = Number(draft.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      toast("warning", "Enter a port from 1 to 65535.");
+      return;
+    }
     try {
       const result = await invoke<{ status: string; path: string | null; fingerprint: string; pinned: string | null; username: string; host: string }>("sftp_open", {
         request: {
           profileId: draft.profileId ?? null,
           label: draft.label,
           host: draft.host,
-          port: Number(draft.port) || 22,
+          port: Number(draft.port),
           username: draft.username,
           password: draft.password || null,
           privateKey: draft.privateKey || null,

@@ -32,7 +32,6 @@ const views: { id: ViewMode; label: string; icon: ReactNode }[] = [
   { id: "details", label: "Details", icon: <AlignJustify /> },
   { id: "icons", label: "Icons", icon: <LayoutGrid /> },
   { id: "tree", label: "Tree", icon: <FolderTree /> },
-  { id: "preview", label: "Preview", icon: <Eye /> },
 ];
 
 export function Panel({ side }: { side: Side }) {
@@ -42,7 +41,10 @@ export function Panel({ side }: { side: Side }) {
   const navigate = useApp((state) => state.navigate);
   const setFilter = useApp((state) => state.setFilter);
   const setView = useApp((state) => state.setView);
+  const previewOther = useApp((state) => state.previewOther);
   const goHistory = useApp((state) => state.goHistory);
+  const otherView = useApp((state) => state.panels[side === "left" ? "right" : "left"].view);
+  const previewing = otherView === "preview" && panel.view !== "preview";
   const places = useApp((state) => state.places);
   const recent = useApp((state) => state.recent);
   const sftpProfiles = useApp((state) => state.sftpProfiles);
@@ -151,22 +153,26 @@ export function Panel({ side }: { side: Side }) {
         </div>
         <div className="seg">
           {views.map((view) => (
-            <button
-              key={view.id}
-              data-active={panel.view === view.id}
-              data-tip={view.id === "preview" && panel.view === "preview" ? "Back" : view.label}
-              onClick={() => {
-                if (view.id === "preview" && panel.view === "preview") {
-                  setView(side, panel.savedView !== "preview" ? panel.savedView : panel.listView);
-                  return;
-                }
-                setView(side, view.id);
-              }}
-            >
+            <button key={view.id} data-active={panel.view === view.id} data-tip={view.label} onClick={() => setView(side, view.id)}>
               {view.icon}
             </button>
           ))}
         </div>
+        <button
+          className="tb-btn"
+          data-active={previewing}
+          data-tip={panel.view === "preview" ? "Back" : previewing ? "Close preview" : "Preview in the other panel"}
+          onClick={() => {
+            setActive(side);
+            if (panel.view === "preview") {
+              setView(side, panel.savedView !== "preview" ? panel.savedView : panel.listView);
+              return;
+            }
+            previewOther();
+          }}
+        >
+          <Eye />
+        </button>
         {panel.view === "icons" && <IconSize />}
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2 top-1.5 h-3.5 w-3.5 text-[var(--muted)]" />

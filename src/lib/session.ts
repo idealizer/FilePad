@@ -11,6 +11,7 @@ export interface SessionData {
   showHidden: boolean;
   iconColors: boolean;
   iconSize: number;
+  keyBar: boolean;
   iconTints: Record<string, string>;
   leftHistory: string[];
   rightHistory: string[];
@@ -36,6 +37,7 @@ export function defaultSession(): SessionData {
     showHidden: false,
     iconColors: true,
     iconSize: 112,
+    keyBar: true,
     iconTints: {},
     leftHistory: [],
     rightHistory: [],

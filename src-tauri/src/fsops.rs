@@ -888,7 +888,7 @@ pub(crate) fn kind_label(is_dir: bool, extension: &str) -> String {
         "ppt" | "pptx" | "pps" | "ppsx" => "PowerPoint presentation".into(),
         "pot" | "potx" => "PowerPoint template".into(),
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => "Audio".into(),
-        "mp4" | "mov" | "mkv" | "webm" | "m4v" => "Video".into(),
+        "mp4" | "mov" | "mkv" | "webm" | "m4v" | "ogv" | "vob" => "Video".into(),
         "zip" => "Zip archive".into(),
         "gz" | "gzip" | "tgz" => "Gzip archive".into(),
         "txt" | "md" | "markdown" | "log" => "Text".into(),

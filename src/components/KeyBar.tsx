@@ -11,6 +11,7 @@ const keys = [
 ];
 
 export function KeyBar() {
+  const toggleKeyBar = useApp((state) => state.toggleKeyBar);
   return (
     <div className="flex h-8 shrink-0 items-stretch overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
       {keys.map((item) => (
@@ -18,6 +19,7 @@ export function KeyBar() {
           <b>{item.key}</b>{item.label}
         </button>
       ))}
+      <button className="fp-key shrink-0 px-3" data-tip="Hide function keys" onClick={toggleKeyBar}>Hide</button>
     </div>
   );
 }

@@ -558,7 +558,9 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
 function MediaView({ preview }: { preview: PreviewFile }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const dvd = preview.extension === "vob";
   useEffect(() => {
+    if (dvd) return;
     let objectUrl = "";
     let cancel = false;
     if (preview.dataBase64) {
@@ -575,7 +577,8 @@ function MediaView({ preview }: { preview: PreviewFile }) {
       cancel = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [preview.path, preview.dataBase64, preview.kind, preview.extension]);
+  }, [dvd, preview.path, preview.dataBase64, preview.kind, preview.extension]);
+  if (dvd) return <Empty text="DVD video (MPEG-2). Use Open to play it." />;
   if (!url && !preview.posterBase64) return <Empty text="Reading…" />;
   return (
     <div className="fp-media">

@@ -89,6 +89,7 @@ export default function App() {
   const showHidden = useApp((state) => state.showHidden);
   const iconColors = useApp((state) => state.iconColors);
   const iconSize = useApp((state) => state.iconSize);
+  const keyBar = useApp((state) => state.keyBar);
   const iconTints = useApp((state) => state.iconTints);
   const leftHistoryAt = useApp((state) => state.panels.left.historyAt);
   const rightHistoryAt = useApp((state) => state.panels.right.historyAt);
@@ -123,7 +124,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, iconSize, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
+  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, iconSize, keyBar, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -258,7 +259,7 @@ export default function App() {
       <SplitPanels />
       <CommandLine />
       <TerminalDrawer />
-      <KeyBar />
+      {keyBar && <KeyBar />}
       <StatusBar />
       <ToastHost />
       <ModalHost />

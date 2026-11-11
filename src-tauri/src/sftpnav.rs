@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 use crate::fsops::{self, DirEntry, DirListing, ItemDetails, TransferProgress, TransferResult};
@@ -412,7 +412,7 @@ async fn open_session(sessions: &mut HashMap<String, Live>, request: OpenRequest
     }
     let port = request.port.or_else(|| existing.as_ref().map(|profile| profile.port)).unwrap_or(22);
     if port == 0 {
-        return Err("Enter a port.".into());
+        return Err("Enter a port from 1 to 65535.".into());
     }
     let username = request.username.clone().filter(|value| !value.trim().is_empty()).or_else(|| existing.as_ref().map(|profile| profile.username.clone())).ok_or_else(|| "Enter a user name.".to_string())?;
     let username = username.trim().to_string();
@@ -532,17 +532,32 @@ enum OpenFail {
     Message(String),
 }
 
+fn reach_message(host: &str, port: u16, err: &SshFail) -> String {
+    let text = err.to_string().to_ascii_lowercase();
+    if text.contains("no such host") || text.contains("not known") || text.contains("name or service not known") || text.contains("nodename nor servname") {
+        return format!("Can't find {host}. Use the SFTP host, which may be an IP address.");
+    }
+    if text.contains("invalid ssh version") {
+        return format!("{host}:{port} answered, but not as SFTP.");
+    }
+    if text.contains("refused") {
+        return format!("Nothing is listening on {host}:{port}.");
+    }
+    format!("Can't reach {host}:{port}.")
+}
+
 async fn connect_live(profile: &Profile, secret: &Secret, allow: Option<String>) -> Result<(Live, String), OpenFail> {
     let seen = Arc::new(Mutex::new(String::new()));
     let handler = KeyCheck { seen: seen.clone(), allow: allow.clone() };
     let config = Arc::new(russh::client::Config::default());
     let address = format!("{}:{}", profile.host, profile.port);
-    let mut handle = match russh::client::connect(config, address, handler).await {
-        Ok(handle) => handle,
-        Err(err) => {
+    let connect = russh::client::connect(config, address, handler);
+    let mut handle = match tokio::time::timeout(Duration::from_secs(12), connect).await {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(err)) => {
             let fingerprint = seen.lock().map(|value| value.clone()).unwrap_or_default();
             if fingerprint.is_empty() {
-                return Err(OpenFail::Message(format!("Can't reach {}:{}.", profile.host, profile.port)));
+                return Err(OpenFail::Message(reach_message(&profile.host, profile.port, &err)));
             }
             let _ = err;
             return match allow {
@@ -551,6 +566,7 @@ async fn connect_live(profile: &Profile, secret: &Secret, allow: Option<String>)
                 Some(_) => Err(OpenFail::NeedPin(fingerprint)),
             };
         }
+        Err(_) => return Err(OpenFail::Message(format!("Can't reach {}:{}.", profile.host, profile.port))),
     };
     let authed = if let Some(pem) = secret.private_key.as_ref().filter(|value| !value.trim().is_empty()) {
         let passphrase = secret.passphrase.as_deref().filter(|value| !value.is_empty());

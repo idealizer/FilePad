@@ -1,4 +1,4 @@
-import { ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderPlus, Ghost, Monitor, Moon, Palette, Pencil, Sun, Terminal, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderPlus, Ghost, Keyboard, Monitor, Moon, Palette, Pencil, Sun, Terminal, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { keys } from "../lib/platform";
 import { useApp } from "../stores/appStore";
@@ -20,6 +20,8 @@ export function Toolbar() {
   const askColors = useApp((state) => state.askColors);
   const terminalOpen = useApp((state) => state.terminalOpen);
   const toggleTerminal = useApp((state) => state.toggleTerminal);
+  const keyBar = useApp((state) => state.keyBar);
+  const toggleKeyBar = useApp((state) => state.toggleKeyBar);
   const askMkdir = useApp((state) => state.askMkdir);
   const askMkfile = useApp((state) => state.askMkfile);
   const askAbout = useApp((state) => state.askAbout);
@@ -47,6 +49,7 @@ export function Toolbar() {
       <button className="tb-btn" data-active={showHidden} data-tip={showHidden ? "Hidden files are visible" : "Hidden files are off"} onClick={toggleHidden}><Ghost /></button>
       <button className="tb-btn" data-tip={iconColors ? "Icon colors" : "Icon colors are off"} onClick={askColors}><span className={iconColors ? undefined : "fp-strike"}><Palette /></span></button>
       <button className="tb-btn" data-active={terminalOpen} data-tip={`Terminal (${keys("Ctrl+`")})`} onClick={toggleTerminal}><Terminal /></button>
+      <button className="tb-btn" data-tip={keyBar ? "Hide function keys" : "Show function keys"} onClick={toggleKeyBar}><span className={keyBar ? undefined : "fp-strike"}><Keyboard /></span></button>
       <span className="flex-1" />
       <button className="tb-btn" data-tip={`Commands (${keys("Ctrl+K")})`} onClick={() => setPalette(true)}><Command /></button>
       <button className="tb-btn" data-tip={`${current.label}. Switch to ${next.label}`} onClick={() => setTheme(next.id)}>{current.icon}</button>

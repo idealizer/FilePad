@@ -5,6 +5,7 @@ import { toast } from "../stores/toastStore";
 import type { McpServerInfo, SftpDraft } from "../types";
 
 const emptyDraft = (): SftpDraft => ({ label: "", host: "", port: "22", username: "", password: "", privateKey: "", passphrase: "", remotePath: "/" });
+const suggestedPorts = ["22", "2222"];
 
 export function SftpDialog() {
   const modal = useApp((state) => state.modal);
@@ -18,21 +19,25 @@ export function SftpDialog() {
   return (
     <>
       <h2 className="text-base font-semibold">Connect with SFTP</h2>
-      <div className="mt-3 grid gap-2">
-        <label className="grid gap-1 text-sm">Label<input className="field" value={draft.label} onChange={(event) => set({ label: event.target.value })} /></label>
-        <div className="grid grid-cols-[1fr_5rem] gap-2">
-          <label className="grid gap-1 text-sm">Host<input className="field" value={draft.host} onChange={(event) => set({ host: event.target.value })} /></label>
-          <label className="grid gap-1 text-sm">Port<input className="field" value={draft.port} onChange={(event) => set({ port: event.target.value })} /></label>
+      <div className="mt-3 grid min-w-0 gap-2">
+        <label className="grid min-w-0 gap-1 text-sm">Connection name<input className="field w-full min-w-0" placeholder="A name you'll recognize" value={draft.label} onChange={(event) => set({ label: event.target.value })} /></label>
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
+          <label className="grid min-w-0 gap-1 text-sm">Host<input className="field w-full min-w-0" placeholder="Host name or IP address" spellCheck={false} value={draft.host} onChange={(event) => set({ host: event.target.value })} /></label>
+          <label className="grid min-w-0 gap-1 text-sm">Port<input className="field w-full min-w-0" list="sftp-ports" inputMode="numeric" placeholder="22" spellCheck={false} value={draft.port} onChange={(event) => set({ port: event.target.value.replace(/[^\d]/g, "").slice(0, 5) })} /></label>
         </div>
-        <label className="grid gap-1 text-sm">User<input className="field" value={draft.username} onChange={(event) => set({ username: event.target.value })} /></label>
-        <label className="grid gap-1 text-sm">Password<input className="field" type="password" value={draft.password} onChange={(event) => set({ password: event.target.value })} /></label>
-        <label className="grid gap-1 text-sm">Private key<textarea className="field h-20 py-1 font-mono text-xs" value={draft.privateKey} onChange={(event) => set({ privateKey: event.target.value })} /></label>
-        <label className="grid gap-1 text-sm">Key passphrase<input className="field" type="password" value={draft.passphrase} onChange={(event) => set({ passphrase: event.target.value })} /></label>
-        <label className="grid gap-1 text-sm">Remote folder<input className="field" value={draft.remotePath} onChange={(event) => set({ remotePath: event.target.value })} /></label>
+        <datalist id="sftp-ports">
+          {suggestedPorts.map((port) => <option key={port} value={port} />)}
+        </datalist>
+        <p className="text-xs text-[var(--muted)]">Pick 22 or 2222, or type another port. Use the SFTP host from the server. A website name on port 22 is often a different service.</p>
+        <label className="grid min-w-0 gap-1 text-sm">User<input className="field w-full min-w-0" placeholder="Username on that server" spellCheck={false} value={draft.username} onChange={(event) => set({ username: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Password<input className="field w-full min-w-0" type="password" placeholder="Leave blank if you use a key" value={draft.password} onChange={(event) => set({ password: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Private key<textarea className="field h-20 w-full min-w-0 py-1 font-mono text-xs" placeholder="Paste a PEM key, or leave blank" value={draft.privateKey} onChange={(event) => set({ privateKey: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Key passphrase<input className="field w-full min-w-0" type="password" placeholder="Only if the key has one" value={draft.passphrase} onChange={(event) => set({ passphrase: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Remote folder<input className="field w-full min-w-0" placeholder="/remote/folder" spellCheck={false} value={draft.remotePath} onChange={(event) => set({ remotePath: event.target.value })} /></label>
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={closeModal}>Cancel</button>
-        <button className="btn primary" disabled={busy} onClick={() => { setBusy(true); void submitSftp(draft).finally(() => setBusy(false)); }}>Connect</button>
+        <button className="btn primary" disabled={busy} onClick={() => { setBusy(true); void submitSftp(draft).finally(() => setBusy(false)); }}>{busy ? "Connecting…" : "Connect"}</button>
       </div>
     </>
   );

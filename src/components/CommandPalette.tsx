@@ -42,6 +42,7 @@ export function CommandPalette() {
     { id: "view", label: "Preview in the other panel", hint: "F3", run: () => useApp.getState().previewOther() },
     { id: "open", label: "Open", hint: "F4", run: () => void useApp.getState().openCurrent() },
     { id: "term", label: "Toggle terminal", hint: keys("Ctrl+`"), run: () => useApp.getState().toggleTerminal() },
+    { id: "keys", label: "Toggle function keys", run: () => useApp.getState().toggleKeyBar() },
     { id: "hidden", label: "Toggle hidden files", run: () => useApp.getState().toggleHidden() },
     { id: "colors", label: "Icon colors", run: () => useApp.getState().askColors() },
     { id: "light", label: "Light theme", run: () => useApp.getState().setTheme("light") },

@@ -63,6 +63,29 @@ export function HostKeyDialog() {
   );
 }
 
+export function SftpResumeDialog() {
+  const modal = useApp((state) => state.modal);
+  const closeModal = useApp((state) => state.closeModal);
+  const confirmSftpResume = useApp((state) => state.confirmSftpResume);
+  if (modal?.type !== "sftpResume") return null;
+  const many = modal.items.length > 1;
+  return (
+    <>
+      <h2 className="text-base font-semibold">Reconnect to {many ? "these servers" : "this server"}?</h2>
+      <p className="mt-2 text-sm text-[var(--muted)]">FilePad was on a server last time. Reconnect, or stay on the Desktop.</p>
+      <ul className="mt-3 text-sm">
+        {modal.items.map((item) => (
+          <li key={item.side} className="truncate">{item.side === "left" ? "Left" : "Right"}: {item.label}</li>
+        ))}
+      </ul>
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn" onClick={closeModal}>Stay on Desktop</button>
+        <button className="btn primary" onClick={() => void confirmSftpResume()}>Reconnect</button>
+      </div>
+    </>
+  );
+}
+
 export function SftpOfferDialog() {
   const modal = useApp((state) => state.modal);
   const closeModal = useApp((state) => state.closeModal);

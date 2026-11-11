@@ -11,7 +11,10 @@ export interface SessionData {
   showHidden: boolean;
   iconColors: boolean;
   iconSize: number;
+  leftIconSize: number;
+  rightIconSize: number;
   keyBar: boolean;
+  scrollLock: boolean;
   iconTints: Record<string, string>;
   leftHistory: string[];
   rightHistory: string[];
@@ -37,7 +40,10 @@ export function defaultSession(): SessionData {
     showHidden: false,
     iconColors: true,
     iconSize: 112,
+    leftIconSize: 112,
+    rightIconSize: 112,
     keyBar: true,
+    scrollLock: false,
     iconTints: {},
     leftHistory: [],
     rightHistory: [],
@@ -52,17 +58,27 @@ export function defaultSession(): SessionData {
   };
 }
 
+function withIconSizes(saved: Partial<SessionData> | null | undefined, merged: SessionData): SessionData {
+  const legacy = typeof saved?.iconSize === "number" ? saved.iconSize : merged.iconSize;
+  return {
+    ...merged,
+    leftIconSize: typeof saved?.leftIconSize === "number" ? saved.leftIconSize : legacy,
+    rightIconSize: typeof saved?.rightIconSize === "number" ? saved.rightIconSize : legacy,
+  };
+}
+
 export async function readSession(): Promise<SessionData> {
   const defaults = defaultSession();
   try {
     if (!inTauri()) {
       const raw = localStorage.getItem(FALLBACK);
-      return raw ? { ...defaults, ...(JSON.parse(raw) as Partial<SessionData>) } : defaults;
+      const saved = raw ? (JSON.parse(raw) as Partial<SessionData>) : null;
+      return withIconSizes(saved, { ...defaults, ...(saved ?? {}) });
     }
     const { load } = await import("@tauri-apps/plugin-store");
     const store = await load("settings.json", { autoSave: true, defaults: {} });
     const saved = await store.get<Partial<SessionData>>("session");
-    return { ...defaults, ...(saved ?? {}) };
+    return withIconSizes(saved, { ...defaults, ...(saved ?? {}) });
   } catch {
     return defaults;
   }

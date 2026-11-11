@@ -1,16 +1,16 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, ChevronRight, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { armDrag, useDragSession } from "../lib/drag";
-import { useIconColor } from "../lib/fileIcon";
+import { FileIcon } from "../lib/fileIcon";
 import { treeRows } from "../lib/rows";
+import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
 
 export function DirTree({ side }: { side: Side }) {
   const panel = useApp((state) => state.panels[side]);
   const showHidden = useApp((state) => state.showHidden);
-  const folderColor = useIconColor(true, "");
   const setActive = useApp((state) => state.setActive);
   const clickEntry = useApp((state) => state.clickEntry);
   const toggleTree = useApp((state) => state.toggleTree);
@@ -19,14 +19,17 @@ export function DirTree({ side }: { side: Side }) {
   const drag = useDragSession();
   const rows = treeRows(panel, showHidden);
   const parent = useRef<HTMLDivElement>(null);
+  useLinkedScroll(side, parent);
   const virtualizer = useVirtualizer({ count: rows.length, getScrollElement: () => parent.current, estimateSize: () => 28, overscan: 12 });
   useEffect(() => {
-    if (rows.length) virtualizer.scrollToIndex(panel.cursor, { align: "auto" });
+    if (panel.cursor < 0 || !rows.length) return;
+    holdScrollSync();
+    virtualizer.scrollToIndex(panel.cursor, { align: "auto" });
   }, [panel.cursor, rows.length, virtualizer]);
 
   return (
     <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-      {!rows.length && <div className="px-3 py-6 text-center text-[var(--muted)]">{panel.loading ? "Reading…" : "No folders here."}</div>}
+      {!rows.length && <div className="px-3 py-6 text-center text-[var(--muted)]">{panel.loading ? "Reading…" : "This folder is empty."}</div>}
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((item) => {
           const row = rows[item.index];
@@ -58,17 +61,22 @@ export function DirTree({ side }: { side: Side }) {
                 openContext({ x: event.clientX, y: event.clientY, side, paths: [row.path] });
               }}
             >
-              <button
-                className="tb-btn sm"
-                style={{ height: 22, minWidth: 22 }}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => void toggleTree(side, row.path)}
-                aria-label={row.expanded ? "Collapse" : "Expand"}
-              >
-                {row.expanded ? <ChevronDown /> : <ChevronRight />}
-              </button>
-              <Folder style={folderColor ? { color: folderColor } : undefined} />
+              {row.isDir ? (
+                <button
+                  className="tb-btn sm"
+                  style={{ height: 22, minWidth: 22 }}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                  onClick={() => void toggleTree(side, row.path)}
+                  aria-label={row.expanded ? "Collapse" : "Expand"}
+                >
+                  {row.expanded ? <ChevronDown /> : <ChevronRight />}
+                </button>
+              ) : (
+                <span style={{ width: 22, minWidth: 22 }} />
+              )}
+              <FileIcon isDir={row.isDir} extension={row.extension} />
               <span className="truncate">{row.name}</span>
             </div>
           );

@@ -52,6 +52,7 @@ export function CommandLine() {
           spellCheck={false}
           onChange={(event) => setCommand(event.target.value)}
           onKeyDown={(event) => {
+            if (!(event.ctrlKey || event.metaKey)) return;
             if (event.key === "ArrowUp") {
               event.preventDefault();
               historyStep(-1);

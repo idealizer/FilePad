@@ -46,7 +46,9 @@ export interface Panel {
   savedView: ViewMode;
   history: string[];
   historyAt: number;
+  viewHistory: ViewMode[];
   localPath: string;
+  iconSize: number;
 }
 
 export interface Clipboard {
@@ -110,6 +112,7 @@ export type ModalState =
   | { type: "properties"; paths: string[] }
   | { type: "overwrite"; transfer: PendingTransfer; conflicts: string[] }
   | { type: "sftp"; draft?: SftpDraft }
+  | { type: "sftpResume"; items: { side: Side; path: string; label: string }[] }
   | { type: "hostKey"; draft: SftpDraft; fingerprint: string; pinned: string | null; status: string }
   | { type: "sftpOffer"; offer: ConnectOffer }
   | { type: "servers" }

@@ -1,8 +1,9 @@
-import { ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderPlus, Ghost, Keyboard, Monitor, Moon, Palette, Pencil, Sun, Terminal, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderPlus, Ghost, Keyboard, Link2, Monitor, Moon, Palette, Pencil, Plus, Sun, Terminal, Trash2, Unlink } from "lucide-react";
 import type { ReactNode } from "react";
 import { keys } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import type { ThemeMode } from "../types";
+import { Dropdown, MenuItem } from "./Menu";
 
 const themes: { id: ThemeMode; label: string; icon: ReactNode }[] = [
   { id: "light", label: "Light", icon: <Sun /> },
@@ -22,6 +23,9 @@ export function Toolbar() {
   const toggleTerminal = useApp((state) => state.toggleTerminal);
   const keyBar = useApp((state) => state.keyBar);
   const toggleKeyBar = useApp((state) => state.toggleKeyBar);
+  const scrollLock = useApp((state) => state.scrollLock);
+  const toggleScrollLock = useApp((state) => state.toggleScrollLock);
+  const split = useApp((state) => state.split);
   const askMkdir = useApp((state) => state.askMkdir);
   const askMkfile = useApp((state) => state.askMkfile);
   const askAbout = useApp((state) => state.askAbout);
@@ -35,11 +39,21 @@ export function Toolbar() {
   const current = themes[index];
   const next = themes[(index + 1) % themes.length];
   return (
-    <header className="flex h-11 shrink-0 items-center gap-0.5 border-b border-[var(--border)] bg-[var(--bg)] px-2">
+    <header className="relative flex h-11 shrink-0 items-center gap-0.5 border-b border-[var(--border)] bg-[var(--bg)] px-2">
       <button className="tb-btn font-semibold text-[var(--text)]" data-tip="About FilePad" onClick={askAbout}>FilePad</button>
       <span className="tb-sep" />
-      <button className="tb-btn" data-tip="New folder (F7)" onClick={askMkdir}><FolderPlus /></button>
-      <button className="tb-btn" data-tip="New file (Shift+F7)" onClick={askMkfile}><FilePlus /></button>
+      <Dropdown
+        button={({ open, toggle }) => (
+          <button className="tb-btn" data-active={open} data-tip="New" onClick={toggle}><Plus />New</button>
+        )}
+      >
+        {(close) => (
+          <>
+            <MenuItem icon={<FolderPlus />} label="Folder" hint="F7" onClick={() => { close(); askMkdir(); }} />
+            <MenuItem icon={<FilePlus />} label="File" hint={keys("Shift+F7")} onClick={() => { close(); askMkfile(); }} />
+          </>
+        )}
+      </Dropdown>
       <button className="tb-btn" data-tip="Copy to the other panel (F5)" onClick={() => void copyToOther()}><Copy /></button>
       <button className="tb-btn" data-tip="Move to the other panel (F6)" onClick={() => void moveToOther()}><ArrowRightLeft /></button>
       <button className="tb-btn" data-tip="Rename (F2)" onClick={askRename}><Pencil /></button>
@@ -51,6 +65,16 @@ export function Toolbar() {
       <button className="tb-btn" data-active={terminalOpen} data-tip={`Terminal (${keys("Ctrl+`")})`} onClick={toggleTerminal}><Terminal /></button>
       <button className="tb-btn" data-tip={keyBar ? "Hide function keys" : "Show function keys"} onClick={toggleKeyBar}><span className={keyBar ? undefined : "fp-strike"}><Keyboard /></span></button>
       <span className="flex-1" />
+      <button
+        className="tb-btn fp-scroll-lock"
+        style={{ left: `calc(4px + ${split} * (100% - 8px) + 5px)` }}
+        data-active={scrollLock}
+        data-tip={scrollLock ? "Unlock scroll" : "Lock scroll"}
+        aria-pressed={scrollLock}
+        onClick={toggleScrollLock}
+      >
+        {scrollLock ? <Link2 /> : <Unlink />}
+      </button>
       <button className="tb-btn" data-tip={`Commands (${keys("Ctrl+K")})`} onClick={() => setPalette(true)}><Command /></button>
       <button className="tb-btn" data-tip={`${current.label}. Switch to ${next.label}`} onClick={() => setTheme(next.id)}>{current.icon}</button>
     </header>

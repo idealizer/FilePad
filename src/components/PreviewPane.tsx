@@ -24,7 +24,9 @@ export function PreviewPane({ side }: { side: Side }) {
   const sourcePanel = panels[source];
   const treeRow = sourcePanel.view === "tree" ? treeRows(sourcePanel, showHidden)[sourcePanel.cursor] : null;
   const row = sourcePanel.view === "tree" ? null : fileRows(sourcePanel, showHidden)[sourcePanel.cursor];
-  const file = row && !row.up && !row.isDir ? row : null;
+  const file = treeRow && !treeRow.isDir
+    ? { key: treeRow.key, name: treeRow.name, path: treeRow.path, isDir: false, size: treeRow.size, modified: treeRow.modified, extension: treeRow.extension, up: false }
+    : row && !row.up && !row.isDir ? row : null;
   const [preview, setPreview] = useState<PreviewFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -64,7 +66,7 @@ export function PreviewPane({ side }: { side: Side }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
-        <span className="min-w-0 flex-1 truncate">{file ? file.name : row?.name ?? "Preview"}</span>
+        <span className="min-w-0 flex-1 truncate">{file ? file.name : treeRow?.name ?? row?.name ?? "Preview"}</span>
         {file && <span className="text-xs text-[var(--muted)]">{formatBytes(file.size)}</span>}
         {preview?.kind === "csv" && (
           <div className="seg" role="tablist" aria-label="CSV view">
@@ -79,7 +81,7 @@ export function PreviewPane({ side }: { side: Side }) {
         )}
       </div>
       <div className={`min-h-0 min-w-0 flex-1 ${preview?.kind === "slides" ? "overflow-hidden" : "overflow-auto"}`}>
-        {treeRow && <ListingView listPath={treeRow.path} source={source} />}
+        {treeRow?.isDir && <ListingView listPath={treeRow.path} source={source} />}
         {!treeRow && !row && <Empty text="Select a file in the other panel." />}
         {!treeRow && row?.up && <Empty text="Parent folder" />}
         {!treeRow && row?.isDir && !row.up && <ListingView listPath={row.path} source={source} />}

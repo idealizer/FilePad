@@ -1,9 +1,10 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { armDrag, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
-import { iconMetrics } from "../lib/iconSize";
-import { fileRows, type Row } from "../lib/rows";
+import { ICON_MAX, iconMetrics } from "../lib/iconSize";
+import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
+import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { invoke } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
@@ -31,25 +32,33 @@ export function IconView({ side }: { side: Side }) {
   const openCurrent = useApp((state) => state.openCurrent);
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
-  const iconSize = useApp((state) => state.iconSize);
+  const iconSize = panel.iconSize;
   const drag = useDragSession();
+  const scrollLock = useApp((state) => state.scrollLock);
+  const otherEntries = useApp((state) => state.panels[side === "left" ? "right" : "left"].entries);
+  const otherFilter = useApp((state) => state.panels[side === "left" ? "right" : "left"].filter);
+  const pairs = useMemo(() => (scrollLock ? otherNames(otherEntries, showHidden, otherFilter) : null), [scrollLock, otherEntries, showHidden, otherFilter]);
   const rows = fileRows(panel, showHidden);
   const parent = useRef<HTMLDivElement>(null);
-  const metrics = iconMetrics(iconSize);
-  const [across, setAcross] = useState(4);
-  useEffect(() => {
+  useLinkedScroll(side, parent);
+  const base = iconMetrics(iconSize);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
     const node = parent.current;
     if (!node) return;
-    const measure = () => {
-      const next = Math.max(1, Math.floor(node.clientWidth / metrics.cell));
-      setAcross(next);
-      setIconColumns(side, next);
-    };
+    const measure = () => setWidth(node.clientWidth);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [side, metrics.cell]);
+  }, [side]);
+  const available = Math.max(base.cell, width - 12);
+  const across = Math.max(1, Math.floor(available / (iconSize >= ICON_MAX ? ICON_MAX : base.cell)));
+  const cell = iconSize >= ICON_MAX ? available / across : base.cell;
+  const metrics = { cell, glyph: Math.round(cell * 0.64), row: Math.round(cell * 0.64) + 52 };
+  useEffect(() => {
+    setIconColumns(side, across);
+  }, [side, across]);
   useEffect(() => {
     const node = parent.current;
     if (!node) return;
@@ -57,18 +66,30 @@ export function IconView({ side }: { side: Side }) {
       if (!event.ctrlKey) return;
       event.preventDefault();
       const state = useApp.getState();
-      state.setIconSize(state.iconSize + (event.deltaY < 0 ? 8 : -8));
+      state.setActive(side);
+      state.setIconSize(side, state.panels[side].iconSize + (event.deltaY < 0 ? 8 : -8));
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [side]);
+  const fromPointer = useRef(false);
   const lineCount = Math.ceil(rows.length / across);
   const virtualizer = useVirtualizer({ count: lineCount, getScrollElement: () => parent.current, estimateSize: () => metrics.row, overscan: 4 });
   useEffect(() => {
     virtualizer.measure();
   }, [metrics.row, virtualizer]);
   useEffect(() => {
-    if (rows.length) virtualizer.scrollToIndex(Math.floor(panel.cursor / across), { align: "auto" });
+    fromPointer.current = false;
+    parent.current?.scrollTo({ top: 0 });
+  }, [panel.path]);
+  useEffect(() => {
+    if (fromPointer.current) {
+      fromPointer.current = false;
+      return;
+    }
+    if (panel.cursor < 0 || !rows.length) return;
+    holdScrollSync();
+    virtualizer.scrollToIndex(Math.floor(panel.cursor / across), { align: "auto" });
   }, [panel.cursor, rows.length, across, virtualizer]);
 
   return (
@@ -92,12 +113,18 @@ export function IconView({ side }: { side: Side }) {
                   className="fp-icon"
                   data-cursor={index === panel.cursor}
                   data-marked={marked}
+                  data-pair={pairMark(pairs, row)}
                   data-drop={Boolean(drag && row.isDir && drag.over === row.path)}
                   data-drop-path={row.up ? panel.parent ?? panel.path : row.isDir ? row.path : panel.path}
                   title={row.name}
                   onDragStart={(event) => event.preventDefault()}
                   onMouseDown={(event) => {
                     setActive(side);
+                    if (panel.cursor !== index) fromPointer.current = true;
+                    if (event.button === 0 && row.up && parentClick(`${side}:${row.key}`)) {
+                      void useApp.getState().openFolder(side, row.path, row.name, true);
+                      return;
+                    }
                     if (event.shiftKey) markRange(side, index);
                     else if (event.ctrlKey || event.metaKey) toggleMark(side, index, false);
                     else clickEntry(side, index);
@@ -110,7 +137,13 @@ export function IconView({ side }: { side: Side }) {
                       return markedPaths.includes(path) ? markedPaths : [path];
                     });
                   }}
-                  onDoubleClick={() => void openCurrent()}
+                  onDoubleClick={() => {
+                    if (row.up) {
+                      if (parentDoubleClick()) void useApp.getState().openFolder(side, row.path, row.name, true);
+                      return;
+                    }
+                    void openCurrent();
+                  }}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     event.stopPropagation();

@@ -72,6 +72,24 @@ function panelView(store: ReturnType<typeof useApp.getState>) {
   return store.panels[actionSide(store)].view;
 }
 
+function keepFieldKeys(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest(".xterm")) return true;
+  if (target instanceof HTMLSelectElement) return true;
+  return target instanceof HTMLInputElement && (target.type === "range" || target.type === "checkbox" || target.type === "radio");
+}
+
+function fileNavKey(key: string): boolean {
+  return key === "ArrowDown" || key === "ArrowUp" || key === "PageDown" || key === "PageUp" || key === "Home" || key === "End";
+}
+
+function focusFilePanel(store: ReturnType<typeof useApp.getState>) {
+  const side = actionSide(store);
+  if (store.active !== side) store.setActive(side);
+  const panel = document.querySelector<HTMLElement>(`[data-panel="${side}"]`);
+  if (panel && document.activeElement !== panel) panel.focus();
+}
+
 function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" {
   if (theme === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   return theme;
@@ -88,8 +106,10 @@ export default function App() {
   const rightView = useApp((state) => state.panels.right.view);
   const showHidden = useApp((state) => state.showHidden);
   const iconColors = useApp((state) => state.iconColors);
-  const iconSize = useApp((state) => state.iconSize);
+  const leftIconSize = useApp((state) => state.panels.left.iconSize);
+  const rightIconSize = useApp((state) => state.panels.right.iconSize);
   const keyBar = useApp((state) => state.keyBar);
+  const scrollLock = useApp((state) => state.scrollLock);
   const iconTints = useApp((state) => state.iconTints);
   const leftHistoryAt = useApp((state) => state.panels.left.historyAt);
   const rightHistoryAt = useApp((state) => state.panels.right.historyAt);
@@ -124,7 +144,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, iconSize, keyBar, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
+  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -175,6 +195,34 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let editing = false;
+    let pointer = false;
+    const onPointer = () => {
+      pointer = true;
+      window.setTimeout(() => {
+        pointer = false;
+      }, 300);
+    };
+    const onBlur = () => {
+      const el = document.activeElement;
+      editing = el instanceof HTMLElement && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable || el.closest(".xterm") !== null);
+    };
+    const onFocus = () => {
+      const store = useApp.getState();
+      if (editing || pointer || store.modal || store.paletteOpen) return;
+      focusFilePanel(store);
+    };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
+  useEffect(() => {
     function onKey(event: KeyboardEvent) {
       const store = useApp.getState();
       if (store.contextMenu && !store.modal && !store.paletteOpen) {
@@ -188,6 +236,11 @@ export default function App() {
         if (event.key === "Escape") {
           event.preventDefault();
           store.closeModal();
+        } else if (store.modal?.type === "delete" && event.key === "Enter" && !event.repeat && !isTyping(event.target)) {
+          const target = event.target;
+          if (target instanceof HTMLElement && target.closest("form")) return;
+          event.preventDefault();
+          void store.confirmDelete();
         }
         return;
       }
@@ -200,6 +253,17 @@ export default function App() {
       const typing = isTyping(event.target);
       const key = event.key;
       const mod = event.ctrlKey || event.metaKey;
+      if (!mod && !event.altKey && fileNavKey(key) && !keepFieldKeys(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const el = document.activeElement;
+        const field = el instanceof HTMLElement && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
+        if (!field) focusFilePanel(store);
+        const live = useApp.getState();
+        const step = key === "ArrowDown" || key === "ArrowUp" ? iconStep(live, key === "ArrowDown" ? 1 : -1) : key === "PageDown" ? 12 : key === "PageUp" ? -12 : key === "Home" ? -100000 : 100000;
+        live.moveCursor(step, event.shiftKey && (key === "ArrowDown" || key === "ArrowUp" || key === "PageDown" || key === "PageUp"));
+        return;
+      }
       if (key === "F2") { event.preventDefault(); store.askRename(); return; }
       if (key === "F3") { event.preventDefault(); store.previewOther(); return; }
       if (key === "F4") { event.preventDefault(); void store.openCurrent(); return; }
@@ -216,8 +280,9 @@ export default function App() {
       if (mod && key.toLowerCase() === "k") { event.preventDefault(); store.setPalette(true); return; }
       if (mod && (key === "`" || event.code === "Backquote")) { event.preventDefault(); store.toggleTerminal(); return; }
       if (key === "Escape") {
-        const marked = store.panels.left.marked.length + store.panels.right.marked.length;
-        if (marked) store.clearMarks();
+        const side = actionSide(store);
+        const selected = store.panels.left.marked.length + store.panels.right.marked.length > 0 || store.panels[side].cursor >= 0;
+        if (selected) store.clearMarks();
         else if (store.outputOpen) store.setOutputOpen(false);
         return;
       }
@@ -249,8 +314,8 @@ export default function App() {
       if (key === "Backspace") { event.preventDefault(); void store.goParent(); return; }
       if (key === "Delete") { event.preventDefault(); store.askDelete(); }
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   return (

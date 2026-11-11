@@ -7,7 +7,7 @@ import { invoke, message } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
 import type { ItemDetails } from "../types";
-import { HostKeyDialog, McpToolDialog, ServersDialog, SftpDialog, SftpOfferDialog } from "./RemoteDialogs";
+import { HostKeyDialog, McpToolDialog, ServersDialog, SftpDialog, SftpOfferDialog, SftpResumeDialog } from "./RemoteDialogs";
 
 export function ModalHost() {
   const modal = useApp((state) => state.modal);
@@ -29,6 +29,7 @@ export function ModalHost() {
         {modal.type === "sftp" && <SftpDialog />}
         {modal.type === "hostKey" && <HostKeyDialog />}
         {modal.type === "sftpOffer" && <SftpOfferDialog />}
+        {modal.type === "sftpResume" && <SftpResumeDialog />}
         {modal.type === "servers" && <ServersDialog />}
         {(modal.type === "mcpTool" || modal.type === "mcpConfirm") && <McpToolDialog />}
       </div>
@@ -50,7 +51,12 @@ function DeleteDialog() {
       ? "This goes to the Recycle Bin."
       : "Local items go to the Recycle Bin. Server items are removed and cannot be undone.";
   return (
-    <>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void confirmDelete();
+      }}
+    >
       <h2 className="text-base font-semibold">Delete {modal.paths.length === 1 ? "this item" : `${modal.paths.length} items`}?</h2>
       <p className="mt-2 text-sm text-[var(--muted)]">{note}</p>
       <ul className="mt-3 max-h-40 overflow-auto text-sm text-[var(--muted)]">
@@ -58,10 +64,10 @@ function DeleteDialog() {
         {modal.paths.length > shown.length && <li>and {modal.paths.length - shown.length} more</li>}
       </ul>
       <div className="mt-4 flex justify-end gap-2">
-        <button className="btn" onClick={closeModal}>Cancel</button>
-        <button className="btn danger" onClick={() => void confirmDelete()}>Delete</button>
+        <button className="btn" type="button" onClick={closeModal}>Cancel</button>
+        <button className="btn danger" type="submit" autoFocus>Delete</button>
       </div>
-    </>
+    </form>
   );
 }
 

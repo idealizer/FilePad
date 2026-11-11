@@ -950,7 +950,7 @@ fn transfer(app: &AppHandle, sources: &[String], dest_dir: &str, overwrite: bool
             return Err("That folder can't be changed.".into());
         };
         let target = dest_dir.join(name);
-        if paths_equal(src, &target) || path_inside(src, &dest_dir) {
+        if paths_equal(src, &target) || paths_equal(src, &dest_dir) || path_inside(src, &dest_dir) {
             return Err("Can't put a folder inside itself.".into());
         }
     }
@@ -994,7 +994,11 @@ fn copy_one(app: &AppHandle, src: &Path, dest: &Path, done: &mut u64, total: u64
         fs::create_dir_all(dest).map_err(|err| format!("Can't create {}: {err}", dest.display()))?;
         for item in fs::read_dir(src).map_err(|err| format!("Can't read {}: {err}", src.display()))? {
             let item = item.map_err(|err| err.to_string())?;
-            copy_one(app, &item.path(), &dest.join(item.file_name()), done, total)?;
+            let child = item.path();
+            if paths_equal(&child, dest) || path_inside(dest, &child) {
+                continue;
+            }
+            copy_one(app, &child, &dest.join(item.file_name()), done, total)?;
         }
         return Ok(());
     }

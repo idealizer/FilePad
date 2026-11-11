@@ -3,10 +3,13 @@ import { archiveFile, baseName, canExtract, diskFolder, isPackedPath, isRemotePa
 import { iconSizeOf } from "../lib/iconSize";
 import type { NameSource, NameTemplate } from "../lib/names";
 import { fileRows, treeRows } from "../lib/rows";
+import { alignScroll, holdScrollSync, setScrollLock } from "../lib/scrollLock";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
 import { readSession, writeSession } from "../lib/session";
 import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, McpTool, ModalState, Panel, PendingTransfer, Place, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
 import { toast } from "./toastStore";
+
+let deleting = false;
 
 function emptyPanel(path = ""): Panel {
   return {
@@ -28,7 +31,9 @@ function emptyPanel(path = ""): Panel {
     savedView: "details",
     history: [],
     historyAt: 0,
+    viewHistory: [],
     localPath: isRemotePath(path) ? "" : path,
+    iconSize: 112,
   };
 }
 
@@ -43,6 +48,13 @@ function archiveBrowse(path: string, extension: string): string | null {
 
 function other(side: Side): Side {
   return side === "left" ? "right" : "left";
+}
+
+function matchedFolder(panel: Panel, name: string, up: boolean): string | null {
+  if (panel.view === "preview" || panel.view === "tree") return null;
+  if (up) return panel.parent;
+  const key = name.toLowerCase();
+  return panel.entries.find((entry) => entry.isDir && entry.name.toLowerCase() === key)?.path ?? null;
 }
 
 export function actionSide(state: { active: Side; panels: { left: Panel; right: Panel } }): Side {
@@ -73,7 +85,7 @@ function selectionSources(state: { active: Side; showHidden: boolean; panels: { 
   if (panel.view === "tree") {
     const row = treeRows(panel, state.showHidden)[panel.cursor];
     if (!row) return { items: [], taken: [] };
-    return { items: [{ path: row.path, name: row.name, modified: 0, isDir: true }], taken: [] };
+    return { items: [{ path: row.path, name: row.name, modified: row.modified, isDir: row.isDir }], taken: [] };
   }
   const wanted = new Set(chosen(state, side));
   const visible = fileRows(panel, state.showHidden).filter((row) => !row.up && wanted.has(row.path));
@@ -130,8 +142,8 @@ interface AppState {
   panels: { left: Panel; right: Panel };
   showHidden: boolean;
   iconColors: boolean;
-  iconSize: number;
   keyBar: boolean;
+  scrollLock: boolean;
   iconTints: Record<string, string>;
   places: Place[];
   recent: string[];
@@ -176,6 +188,7 @@ interface AppState {
   markAll: () => void;
   clearMarks: () => void;
   openEntry: () => Promise<void>;
+  openFolder: (side: Side, path: string, name: string, up: boolean) => Promise<void>;
   goParent: () => Promise<void>;
   ensureTree: (side: Side, path: string) => Promise<void>;
   toggleTree: (side: Side, path: string) => Promise<void>;
@@ -206,6 +219,7 @@ interface AppState {
   deleteNameTemplate: (label: string) => void;
   confirmOverwrite: () => Promise<void>;
   closeModal: () => void;
+  confirmSftpResume: () => Promise<void>;
   focusForMenu: (side: Side, index: number, path: string) => void;
   openContext: (menu: ContextMenuState) => void;
   closeContext: () => void;
@@ -213,13 +227,14 @@ interface AppState {
   openInTextpad: () => Promise<void>;
   previewOther: () => void;
   toggleHidden: () => void;
-  setIconSize: (size: number) => void;
+  setIconSize: (side: Side, size: number) => void;
   toggleIconColors: () => void;
   askColors: () => void;
   setIconTint: (id: string, color: string | null) => void;
   resetIconTints: () => void;
   toggleTerminal: () => void;
   toggleKeyBar: () => void;
+  toggleScrollLock: () => void;
   setSplit: (split: number) => void;
   setOutputHeight: (height: number) => void;
   setTerminalHeight: (height: number) => void;
@@ -247,8 +262,8 @@ export const useApp = create<AppState>((set, get) => ({
   panels: { left: emptyPanel(), right: emptyPanel() },
   showHidden: false,
   iconColors: true,
-  iconSize: 112,
   keyBar: true,
+  scrollLock: false,
   iconTints: {},
   places: [],
   recent: [],
@@ -288,13 +303,14 @@ export const useApp = create<AppState>((set, get) => ({
         toast("error", message(error));
       }
     }
+    setScrollLock(session.scrollLock);
     const listView = (view: ViewMode): Panel["listView"] => (view === "files" || view === "icons" ? view : "details");
     set({
       theme: session.theme,
       showHidden: session.showHidden,
       iconColors: session.iconColors,
-      iconSize: iconSizeOf(session.iconSize),
       keyBar: session.keyBar,
+      scrollLock: session.scrollLock,
       iconTints: storedTints(session.iconTints),
       recent: session.recent,
       commandHistory: session.commandHistory,
@@ -309,21 +325,48 @@ export const useApp = create<AppState>((set, get) => ({
           ...emptyPanel(),
           view: session.leftView,
           listView: listView(session.leftView),
+          iconSize: iconSizeOf(session.leftIconSize),
           history: storedHistory(session.leftHistory),
           historyAt: storedAt(storedHistory(session.leftHistory), session.leftHistoryAt),
+          viewHistory: storedHistory(session.leftHistory).map(() => session.leftView),
         },
         right: {
           ...emptyPanel(),
           view: session.rightView,
           listView: listView(session.rightView),
+          iconSize: iconSizeOf(session.rightIconSize),
           history: storedHistory(session.rightHistory),
           historyAt: storedAt(storedHistory(session.rightHistory), session.rightHistoryAt),
+          viewHistory: storedHistory(session.rightHistory).map(() => session.rightView),
         },
       },
     });
-    await get().navigate("left", session.leftPath || home);
-    await get().navigate("right", session.rightPath || home);
-    set({ ready: true });
+    const desktop = places.find((place) => place.role === "desktop")?.path || home;
+    const resume: { side: Side; path: string; label: string }[] = [];
+    let profiles: SftpProfile[] = [];
+    if (inTauri() && (isRemotePath(session.leftPath) || isRemotePath(session.rightPath))) {
+      try {
+        profiles = await invoke<SftpProfile[]>("sftp_profiles");
+      } catch {
+        profiles = [];
+      }
+    }
+    const openSaved = async (side: Side, saved: string) => {
+      if (!isRemotePath(saved)) {
+        await get().navigate(side, saved || home);
+        return;
+      }
+      const remote = remoteParts(saved);
+      const profile = profiles.find((item) => item.id === remote?.id);
+      const where = remote?.remote || "/";
+      resume.push({ side, path: saved, label: profile?.label ? `${profile.label} (${where})` : where });
+      await get().navigate(side, desktop || home, false);
+      const shown = get().panels[side].path || desktop || home;
+      set((state) => ({ panels: patch(state.panels, side, { history: [shown], historyAt: 0, viewHistory: [state.panels[side].view] }) }));
+    };
+    await openSaved("left", session.leftPath);
+    await openSaved("right", session.rightPath);
+    set({ ready: true, ...(resume.length ? { modal: { type: "sftpResume", items: resume } } : {}) });
   },
 
   persist: async () => {
@@ -336,8 +379,11 @@ export const useApp = create<AppState>((set, get) => ({
       rightView: state.panels.right.view,
       showHidden: state.showHidden,
       iconColors: state.iconColors,
-      iconSize: state.iconSize,
+      iconSize: state.panels.left.iconSize,
+      leftIconSize: state.panels.left.iconSize,
+      rightIconSize: state.panels.right.iconSize,
       keyBar: state.keyBar,
+      scrollLock: state.scrollLock,
       iconTints: state.iconTints,
       leftHistory: state.panels.left.history,
       rightHistory: state.panels.right.history,
@@ -382,8 +428,11 @@ export const useApp = create<AppState>((set, get) => ({
         const panel = state.panels[side];
         let history = panel.history;
         let historyAt = panel.historyAt;
+        let viewHistory = panel.viewHistory ?? [];
         if (record && history[historyAt]?.toLowerCase() !== listing.path.toLowerCase()) {
+          const prior = viewHistory.length === history.length ? viewHistory : history.map(() => panel.view);
           history = [...history.slice(0, historyAt + 1), listing.path].slice(-48);
+          viewHistory = [...prior.slice(0, historyAt + 1), panel.view].slice(-48);
           historyAt = history.length - 1;
         }
         return {
@@ -402,6 +451,7 @@ export const useApp = create<AppState>((set, get) => ({
             treeExpanded: [],
             history,
             historyAt,
+            viewHistory,
             localPath: isRemotePath(listing.path) ? panel.localPath : listing.path,
           }),
         };
@@ -418,11 +468,13 @@ export const useApp = create<AppState>((set, get) => ({
     const next = panel.historyAt + dir;
     const path = panel.history[next];
     if (!path) return;
+    const view = panel.viewHistory?.[next];
     const before = panel.path;
     await get().navigate(side, path, false);
     const after = get().panels[side].path;
     if (after.toLowerCase() === before.toLowerCase() && after.toLowerCase() !== path.toLowerCase()) return;
     set((state) => ({ panels: patch(state.panels, side, { historyAt: next }) }));
+    if (view && view !== get().panels[side].view) get().setView(side, view);
   },
 
   refresh: async (side) => {
@@ -456,6 +508,7 @@ export const useApp = create<AppState>((set, get) => ({
   setFilter: (side, filter) => set((state) => ({ panels: patch(state.panels, side, { filter, cursor: 0, anchor: 0 }) })),
 
   setView: (side, view) => {
+    if (get().panels[side].view === view) return;
     set((state) => {
       const panel = state.panels[side];
       const listView = view === "files" || view === "details" || view === "icons" ? view : panel.listView;
@@ -463,7 +516,10 @@ export const useApp = create<AppState>((set, get) => ({
       const leavingPreview = panel.view === "preview" && view !== "preview";
       const savedView = enteringPreview ? panel.view : panel.savedView;
       const cursor = enteringPreview || leavingPreview ? panel.cursor : 0;
-      return { panels: patch(state.panels, side, { view, listView, savedView, cursor, anchor: cursor }) };
+      const viewHistory = [...(panel.viewHistory ?? [])];
+      while (viewHistory.length < panel.history.length) viewHistory.push(panel.view);
+      if (panel.history.length) viewHistory[panel.historyAt] = view;
+      return { panels: patch(state.panels, side, { view, listView, savedView, cursor, anchor: cursor, viewHistory }) };
     });
     if (view === "tree") void get().ensureTree(side, get().panels[side].path);
   },
@@ -476,20 +532,27 @@ export const useApp = create<AppState>((set, get) => ({
 
   moveCursor: (delta, mark) => {
     const state = get();
-    const side = actionSide(state);
-    const panel = state.panels[side];
-    const rows = panel.view === "tree" ? treeRows(panel, state.showHidden) : fileRows(panel, state.showHidden);
-    if (!rows.length) return;
-    const next = Math.max(0, Math.min(rows.length - 1, panel.cursor + delta));
-    if (mark && panel.view !== "tree") {
-      const list = fileRows(panel, state.showHidden);
-      const lo = Math.min(panel.anchor, next);
-      const hi = Math.max(panel.anchor, next);
-      const add = list.slice(lo, hi + 1).filter((row) => !row.up).map((row) => row.path);
-      set((current) => ({ panels: patch(current.panels, side, { cursor: next, marked: [...new Set([...panel.marked, ...add])] }) }));
-      return;
-    }
-    set((current) => ({ panels: patch(current.panels, side, { cursor: next, anchor: next }) }));
+    const active = actionSide(state);
+    const sides: Side[] = state.scrollLock ? ["left", "right"] : [active];
+    set((current) => {
+      let panels = current.panels;
+      for (const side of sides) {
+        const panel = panels[side];
+        const rows = panel.view === "tree" ? treeRows(panel, current.showHidden) : fileRows(panel, current.showHidden);
+        if (!rows.length) continue;
+        const next = Math.max(0, Math.min(rows.length - 1, panel.cursor + delta));
+        if (mark && side === active && panel.view !== "tree") {
+          const list = fileRows(panel, current.showHidden);
+          const lo = Math.min(panel.anchor, next);
+          const hi = Math.max(panel.anchor, next);
+          const add = list.slice(lo, hi + 1).filter((row) => !row.up).map((row) => row.path);
+          panels = patch(panels, side, { cursor: next, marked: [...new Set([...panel.marked, ...add])] });
+        } else {
+          panels = patch(panels, side, { cursor: next, anchor: next });
+        }
+      }
+      return { panels };
+    });
   },
 
   toggleMark: (side, index, advance) => {
@@ -497,7 +560,7 @@ export const useApp = create<AppState>((set, get) => ({
     const panel = state.panels[side];
     if (panel.view === "tree") {
       const row = treeRows(panel, state.showHidden)[index];
-      if (row) void get().toggleTree(side, row.path);
+      if (row?.isDir) void get().toggleTree(side, row.path);
       return;
     }
     const rows = fileRows(panel, state.showHidden);
@@ -530,12 +593,11 @@ export const useApp = create<AppState>((set, get) => ({
     set((current) => ({ panels: patch(current.panels, side, { marked: paths }) }));
   },
 
-  clearMarks: () => set((state) => ({
-    panels: {
-      left: { ...state.panels.left, marked: [] },
-      right: { ...state.panels.right, marked: [] },
-    },
-  })),
+  clearMarks: () => set((state) => {
+    const side = actionSide(state);
+    const bare = (panel: Panel, clearCursor: boolean): Panel => ({ ...panel, marked: [], ...(clearCursor ? { cursor: -1, anchor: -1 } : {}) });
+    return { panels: { left: bare(state.panels.left, side === "left"), right: bare(state.panels.right, side === "right") } };
+  }),
 
   openEntry: async () => {
     const state = get();
@@ -544,14 +606,26 @@ export const useApp = create<AppState>((set, get) => ({
     if (panel.view === "tree") {
       const row = treeRows(panel, state.showHidden)[panel.cursor];
       if (!row) return;
-      set((current) => ({ panels: patch(current.panels, side, { view: panel.listView }) }));
-      await get().navigate(side, row.path);
+      if (row.isDir) {
+        await get().navigate(side, row.path);
+        return;
+      }
+      const browse = archiveBrowse(row.path, row.extension);
+      if (browse) {
+        await get().navigate(side, browse);
+        return;
+      }
+      if (isArchiveName(row.extension)) {
+        toast("warning", "Copy this archive out to browse inside it.");
+        return;
+      }
+      get().setView(other(side), "preview");
       return;
     }
     const row = fileRows(panel, state.showHidden)[panel.cursor];
     if (!row) return;
     if (row.up || row.isDir) {
-      await get().navigate(side, row.path);
+      await get().openFolder(side, row.path, row.name, row.up);
       return;
     }
     const browse = archiveBrowse(row.path, row.extension);
@@ -569,7 +643,14 @@ export const useApp = create<AppState>((set, get) => ({
   goParent: async () => {
     const side = actionSide(get());
     const parent = get().panels[side].parent;
-    if (parent) await get().navigate(side, parent);
+    if (parent) await get().openFolder(side, parent, "..", true);
+  },
+
+  openFolder: async (side, path, name, up) => {
+    const state = get();
+    const mirror = state.scrollLock ? matchedFolder(state.panels[other(side)], name, up) : null;
+    await get().navigate(side, path);
+    if (mirror) await get().navigate(other(side), mirror);
   },
 
   ensureTree: async (side, path) => {
@@ -834,14 +915,18 @@ export const useApp = create<AppState>((set, get) => ({
 
   confirmDelete: async () => {
     const modal = get().modal;
-    if (modal?.type !== "delete") return;
+    if (modal?.type !== "delete" || deleting) return;
+    deleting = true;
+    const paths = modal.paths.slice();
     try {
-      await invoke("delete_paths", { paths: modal.paths });
+      await invoke("delete_paths", { paths });
       set({ modal: null });
-      toast("success", modal.paths.length === 1 ? "Deleted 1 item." : `Deleted ${modal.paths.length} items.`);
+      toast("success", paths.length === 1 ? "Deleted 1 item." : `Deleted ${paths.length} items.`);
       await get().refreshBoth();
     } catch (error) {
       toast("error", message(error));
+    } finally {
+      deleting = false;
     }
   },
 
@@ -967,6 +1052,14 @@ export const useApp = create<AppState>((set, get) => ({
 
   closeModal: () => set({ modal: null, paletteOpen: false, contextMenu: null }),
 
+  confirmSftpResume: async () => {
+    const modal = get().modal;
+    if (modal?.type !== "sftpResume") return;
+    const items = modal.items;
+    set({ modal: null });
+    for (const item of items) await get().navigate(item.side, item.path);
+  },
+
   focusForMenu: (side, index, path) => set((state) => {
     const panel = state.panels[side];
     const keep = panel.marked.includes(path);
@@ -982,13 +1075,28 @@ export const useApp = create<AppState>((set, get) => ({
     const side = actionSide(state);
     const panel = state.panels[side];
     if (panel.view === "tree") {
-      await get().openEntry();
+      const row = treeRows(panel, state.showHidden)[panel.cursor];
+      if (!row) return;
+      if (row.isDir) {
+        await get().navigate(side, row.path);
+        return;
+      }
+      const browse = archiveBrowse(row.path, row.extension);
+      if (browse) {
+        await get().navigate(side, browse);
+        return;
+      }
+      try {
+        await openExternal(row.path);
+      } catch (error) {
+        toast("error", message(error));
+      }
       return;
     }
     const row = fileRows(panel, state.showHidden)[panel.cursor];
-    if (!row || row.up) return;
-    const browse = !row.isDir ? archiveBrowse(row.path, row.extension) : null;
-    if (row.isDir) await get().navigate(side, row.path);
+    if (!row) return;
+    const browse = !row.up && !row.isDir ? archiveBrowse(row.path, row.extension) : null;
+    if (row.up || row.isDir) await get().openFolder(side, row.path, row.name, row.up);
     else if (browse) await get().navigate(side, browse);
     else {
       try {
@@ -1023,7 +1131,10 @@ export const useApp = create<AppState>((set, get) => ({
     get().setView(side, "preview");
   },
 
-  setIconSize: (size) => set({ iconSize: iconSizeOf(size) }),
+  setIconSize: (side, size) => {
+    holdScrollSync();
+    set((state) => ({ panels: patch(state.panels, side, { iconSize: iconSizeOf(size) }) }));
+  },
   toggleHidden: () => set((state) => ({ showHidden: !state.showHidden })),
   toggleIconColors: () => set((state) => ({ iconColors: !state.iconColors })),
   askColors: () => set({ paletteOpen: false, contextMenu: null, modal: { type: "colors" } }),
@@ -1037,6 +1148,12 @@ export const useApp = create<AppState>((set, get) => ({
   resetIconTints: () => set({ iconTints: {} }),
   toggleTerminal: () => set((state) => ({ terminalOpen: !state.terminalOpen })),
   toggleKeyBar: () => set((state) => ({ keyBar: !state.keyBar })),
+  toggleScrollLock: () => {
+    const scrollLock = !get().scrollLock;
+    setScrollLock(scrollLock);
+    set({ scrollLock });
+    if (scrollLock) alignScroll(get().active);
+  },
   setSplit: (split) => set({ split: clamp(split, 0.18, 0.82) }),
   setOutputHeight: (outputHeight) => set({ outputHeight: clamp(outputHeight, 72, 800) }),
   setTerminalHeight: (terminalHeight) => set({ terminalHeight: clamp(terminalHeight, 120, 800) }),

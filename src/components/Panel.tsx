@@ -1,4 +1,4 @@
-import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, LayoutGrid, List, MemoryStick, Monitor, Network, Search, Usb } from "lucide-react";
+import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, LayoutGrid, List, MemoryStick, Monitor, Network, Search, Unplug, Usb } from "lucide-react";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useDragSession } from "../lib/drag";
 import { displayPath, isRemotePath, storePath } from "../lib/format";
@@ -62,6 +62,7 @@ export function Panel({ side }: { side: Side }) {
     <section
       data-panel={side}
       data-active={active}
+      data-remote={isRemotePath(panel.path)}
       data-drop={Boolean(drag && drag.side === side && drag.over === panel.path)}
       data-drop-path={panel.path}
       tabIndex={-1}
@@ -108,6 +109,11 @@ export function Panel({ side }: { side: Side }) {
             onChange={(event) => setDraft(event.target.value)}
           />
         </form>
+        {isRemotePath(panel.path) && (
+          <button className="tb-btn fp-disconnect" data-tip="Disconnect" onClick={() => { setActive(side); void useApp.getState().disconnectSftp(side); }}>
+            <Unplug />
+          </button>
+        )}
         <Dropdown
           align="end"
           button={({ open, toggle }) => (
@@ -173,7 +179,7 @@ export function Panel({ side }: { side: Side }) {
         >
           <Eye />
         </button>
-        {panel.view === "icons" && <IconSize />}
+        {panel.view === "icons" && <IconSize side={side} />}
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2 top-1.5 h-3.5 w-3.5 text-[var(--muted)]" />
           <input className="field fp-filter h-7 w-full pl-7" placeholder="Filter" value={panel.filter} onChange={(event) => setFilter(side, event.target.value)} />
@@ -185,8 +191,8 @@ export function Panel({ side }: { side: Side }) {
   );
 }
 
-function IconSize() {
-  const size = useApp((state) => state.iconSize);
+function IconSize({ side }: { side: Side }) {
+  const size = useApp((state) => state.panels[side].iconSize);
   const setIconSize = useApp((state) => state.setIconSize);
   return (
     <input
@@ -199,7 +205,8 @@ function IconSize() {
       value={size}
       aria-label="Icon size"
       data-tip={`Icon size ${size}`}
-      onChange={(event) => setIconSize(Number(event.target.value))}
+      onPointerDown={() => useApp.getState().setActive(side)}
+      onChange={(event) => setIconSize(side, Number(event.target.value))}
     />
   );
 }

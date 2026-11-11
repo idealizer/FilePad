@@ -1,9 +1,10 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { armDrag, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
 import { formatBytes, formatWhen, typeLabel } from "../lib/format";
-import { fileRows, type Row } from "../lib/rows";
+import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
+import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
 
@@ -19,23 +20,37 @@ export function FileList({ side }: { side: Side }) {
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
+  const scrollLock = useApp((state) => state.scrollLock);
+  const otherEntries = useApp((state) => state.panels[side === "left" ? "right" : "left"].entries);
+  const otherFilter = useApp((state) => state.panels[side === "left" ? "right" : "left"].filter);
+  const pairs = useMemo(() => (scrollLock ? otherNames(otherEntries, showHidden, otherFilter) : null), [scrollLock, otherEntries, showHidden, otherFilter]);
   const rows = fileRows(panel, showHidden);
   const parent = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({ count: rows.length, getScrollElement: () => parent.current, estimateSize: () => (panel.view === "details" ? 30 : 28), overscan: 16 });
+  useLinkedScroll(side, parent);
+  const fromPointer = useRef(false);
+  const virtualizer = useVirtualizer({ count: rows.length, getScrollElement: () => parent.current, estimateSize: () => 28, overscan: 16 });
   useEffect(() => {
-    if (rows.length) virtualizer.scrollToIndex(panel.cursor, { align: "auto" });
+    fromPointer.current = false;
+    parent.current?.scrollTo({ top: 0 });
+  }, [panel.path]);
+  useEffect(() => {
+    if (fromPointer.current) {
+      fromPointer.current = false;
+      return;
+    }
+    if (panel.cursor < 0 || !rows.length) return;
+    holdScrollSync();
+    virtualizer.scrollToIndex(panel.cursor, { align: "auto" });
   }, [panel.cursor, rows.length, virtualizer]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {panel.view === "details" && (
-        <div className="fp-head fp-details px-2">
-          <button data-active={panel.sortKey === "name"} onClick={() => setSort(side, "name")}>Name{panel.sortKey === "name" ? (panel.sortAsc ? " ↑" : " ↓") : ""}</button>
-          <button data-active={panel.sortKey === "size"} onClick={() => setSort(side, "size")}>Size</button>
-          <button data-active={panel.sortKey === "modified"} onClick={() => setSort(side, "modified")}>Modified</button>
-          <button data-active={panel.sortKey === "type"} onClick={() => setSort(side, "type")}>Type</button>
-        </div>
-      )}
+      <div className="fp-head fp-details px-2">
+        <button data-active={panel.sortKey === "name"} onClick={() => setSort(side, "name")}>Name{panel.sortKey === "name" ? (panel.sortAsc ? " ↑" : " ↓") : ""}</button>
+        <button data-active={panel.sortKey === "size"} onClick={() => setSort(side, "size")}>Size</button>
+        <button data-active={panel.sortKey === "modified"} onClick={() => setSort(side, "modified")}>Modified</button>
+        <button data-active={panel.sortKey === "type"} onClick={() => setSort(side, "type")}>Type</button>
+      </div>
       <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
         {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
@@ -51,12 +66,18 @@ export function FileList({ side }: { side: Side }) {
                 className={panel.view === "details" ? "fp-row fp-details" : "fp-row"}
                 data-cursor={item.index === panel.cursor}
                 data-marked={marked}
+                data-pair={pairMark(pairs, row)}
                 data-drop={Boolean(drag && row.isDir && drag.over === row.path)}
                 data-drop-path={dropPath}
                 title={row.path}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${item.start}px)` }}
                 onMouseDown={(event) => {
                   setActive(side);
+                  if (panel.cursor !== item.index) fromPointer.current = true;
+                  if (event.button === 0 && row.up && parentClick(`${side}:${row.key}`)) {
+                    void useApp.getState().openFolder(side, row.path, row.name, true);
+                    return;
+                  }
                   if (event.shiftKey) markRange(side, item.index);
                   else if (event.ctrlKey || event.metaKey) toggleMark(side, item.index, false);
                   else clickEntry(side, item.index);
@@ -70,7 +91,13 @@ export function FileList({ side }: { side: Side }) {
                     return markedPaths.includes(path) ? markedPaths : [path];
                   });
                 }}
-                onDoubleClick={() => void openCurrent()}
+                onDoubleClick={() => {
+                  if (row.up) {
+                    if (parentDoubleClick()) void useApp.getState().openFolder(side, row.path, row.name, true);
+                    return;
+                  }
+                  void openCurrent();
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   event.stopPropagation();

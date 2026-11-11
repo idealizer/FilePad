@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { parentPath } from "./format";
+import { isPackedPath, isRemotePath, parentPath, remoteParts } from "./format";
 import { invoke, message } from "./platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
@@ -9,6 +9,7 @@ export interface DragSession {
   x: number;
   y: number;
   move: boolean;
+  hint: string;
   over: string | null;
   side: string | null;
 }
@@ -37,6 +38,42 @@ function subscribe(listener: () => void) {
 function clearSession() {
   session = null;
   document.body.classList.remove("fp-dragging");
+  delete document.body.dataset.drag;
+  publish();
+}
+
+function volumeOf(path: string): string | null {
+  if (isPackedPath(path)) return null;
+  if (isRemotePath(path)) {
+    const remote = remoteParts(path);
+    return remote ? `sftp:${remote.id}` : null;
+  }
+  if (path.startsWith("\\\\") || path.startsWith("//")) {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    if (parts.length < 2) return null;
+    return `unc:${parts[0].toLowerCase()}\\${parts[1].toLowerCase()}`;
+  }
+  const drive = /^([a-zA-Z]:)/.exec(path);
+  return drive ? drive[1].toLowerCase() : null;
+}
+
+function sameVolume(paths: string[], dest: string): boolean {
+  const from = volumeOf(paths[0] ?? "");
+  if (!from) return false;
+  return paths.every((path) => volumeOf(path) === from) && volumeOf(dest) === from;
+}
+
+function dragAction(paths: string[], dest: string | null, shift: boolean, ctrl: boolean): { move: boolean; hint: string } {
+  if (!dest) return { move: false, hint: "Release to cancel" };
+  if (ctrl) return { move: false, hint: "Ctrl copies" };
+  if (shift) return { move: true, hint: "Shift moves" };
+  return sameVolume(paths, dest) ? { move: true, hint: "Same drive" } : { move: false, hint: "Different drive" };
+}
+
+function showSession(next: DragSession) {
+  session = next;
+  document.body.classList.add("fp-dragging");
+  document.body.dataset.drag = next.over ? (next.move ? "move" : "copy") : "none";
   publish();
 }
 
@@ -81,10 +118,8 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       const paths = readPaths().filter(Boolean);
       if (!paths.length) return;
       active = true;
-      document.body.classList.add("fp-dragging");
       const place = hit(ev.clientX, ev.clientY);
-      session = { paths, x: ev.clientX, y: ev.clientY, move: ev.shiftKey, ...place };
-      publish();
+      showSession({ paths, x: ev.clientX, y: ev.clientY, ...dragAction(paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey), ...place });
     }
     if (!session) return;
     if (ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight) {
@@ -95,8 +130,8 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       void invoke("start_file_drag", { paths }).catch((reason: unknown) => toast("error", message(reason)));
       return;
     }
-    session = { ...session, x: ev.clientX, y: ev.clientY, move: ev.shiftKey, ...hit(ev.clientX, ev.clientY) };
-    publish();
+    const place = hit(ev.clientX, ev.clientY);
+    showSession({ ...session, x: ev.clientX, y: ev.clientY, ...dragAction(session.paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey), ...place });
   };
 
   const key = (ev: KeyboardEvent) => {
@@ -110,8 +145,8 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       return;
     }
     if (!session) return;
-    session = { ...session, move: ev.shiftKey };
-    publish();
+    const place = { over: session.over, side: session.side };
+    showSession({ ...session, ...dragAction(session.paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey) });
   };
 
   const up = (ev: PointerEvent) => {
@@ -125,13 +160,15 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       toast("warning", "Already in this folder.");
       return;
     }
-    void useApp.getState().beginTransfer(ev.shiftKey ? "cut" : "copy", sources, dest);
+    const action = dragAction(sources, dest, ev.shiftKey, ev.ctrlKey || ev.metaKey);
+    void useApp.getState().beginTransfer(action.move ? "cut" : "copy", sources, dest);
   };
 
   const finish = () => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     window.removeEventListener("keydown", key);
+    window.removeEventListener("keyup", key);
     window.removeEventListener("blur", finish);
     stopListeners = null;
     clearSession();
@@ -141,5 +178,6 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
   window.addEventListener("keydown", key);
+  window.addEventListener("keyup", key);
   window.addEventListener("blur", finish);
 }

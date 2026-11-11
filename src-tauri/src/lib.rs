@@ -15,7 +15,7 @@ mod thumbs;
 mod zipnav;
 
 use shell::ShellState;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 async fn file_thumb(path: String) -> Result<thumbs::Thumb, String> {
@@ -288,6 +288,13 @@ pub fn mcp_stdio() {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             bridge::start(app.handle().clone());

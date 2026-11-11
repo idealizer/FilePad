@@ -18,6 +18,10 @@ export interface TreeRow {
   path: string;
   depth: number;
   expanded: boolean;
+  isDir: boolean;
+  size: number;
+  modified: number;
+  extension: string;
 }
 
 export function fileRows(panel: Panel, showHidden: boolean): Row[] {
@@ -36,19 +40,74 @@ export function treeRows(panel: Panel, showHidden: boolean): TreeRow[] {
   const rows: TreeRow[] = [];
   const query = panel.filter.trim().toLowerCase();
   const walk = (path: string, depth: number) => {
-    const kids = (panel.treeKids[path] ?? []).filter((entry) => entry.isDir && (showHidden || !entry.hidden));
+    const kids = (panel.treeKids[path] ?? []).filter((entry) => showHidden || !entry.hidden);
+    kids.sort((left, right) => compareEntries(left, right, panel.sortKey, panel.sortAsc));
     for (const kid of kids) {
-      if (query && !kid.name.toLowerCase().includes(query)) continue;
-      rows.push({ key: kid.path, name: kid.name, path: kid.path, depth, expanded: panel.treeExpanded.includes(kid.path) });
-      if (panel.treeExpanded.includes(kid.path)) walk(kid.path, depth + 1);
+      const open = kid.isDir && panel.treeExpanded.includes(kid.path);
+      const matches = !query || kid.name.toLowerCase().includes(query);
+      if (matches || open) {
+        rows.push({
+          key: kid.path,
+          name: kid.name,
+          path: kid.path,
+          depth,
+          expanded: open,
+          isDir: kid.isDir,
+          size: kid.size,
+          modified: kid.modified,
+          extension: kid.extension,
+        });
+      }
+      if (open) walk(kid.path, depth + 1);
     }
   };
   walk(panel.path, 0);
   return rows;
 }
 
+export function otherNames(entries: Entry[], showHidden: boolean, filter: string): Set<string> {
+  const query = filter.trim().toLowerCase();
+  const names = new Set<string>();
+  for (const entry of entries) {
+    if (!showHidden && entry.hidden) continue;
+    const name = entry.name.toLowerCase();
+    if (query && !name.includes(query)) continue;
+    names.add(name);
+  }
+  return names;
+}
+
+export function pairMark(names: Set<string> | null, row: { up: boolean; name: string }): "same" | "only" | undefined {
+  if (!names || row.up) return undefined;
+  return names.has(row.name.toLowerCase()) ? "same" : "only";
+}
+
 function toRow(entry: Entry): Row {
   return { key: entry.path, name: entry.name, path: entry.path, isDir: entry.isDir, size: entry.size, modified: entry.modified, extension: entry.extension, up: false };
+}
+
+let lastUpClick = { key: "", at: 0 };
+let climbedAt = 0;
+
+export function parentClick(key: string): boolean {
+  const now = performance.now();
+  if (lastUpClick.key === key && now - lastUpClick.at < 500) {
+    lastUpClick = { key: "", at: 0 };
+    return takeClimb(now);
+  }
+  lastUpClick = { key, at: now };
+  return false;
+}
+
+export function parentDoubleClick(): boolean {
+  lastUpClick = { key: "", at: 0 };
+  return takeClimb(performance.now());
+}
+
+function takeClimb(now: number): boolean {
+  if (now - climbedAt < 450) return false;
+  climbedAt = now;
+  return true;
 }
 
 function compareEntries(left: Entry, right: Entry, key: Panel["sortKey"], asc: boolean): number {

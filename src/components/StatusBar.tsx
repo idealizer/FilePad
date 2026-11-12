@@ -1,5 +1,5 @@
-import { fileRows } from "../lib/rows";
-import { formatBytes } from "../lib/format";
+import { fileRows, previewTarget } from "../lib/rows";
+import { formatBytes, formatWhen, typeLabel } from "../lib/format";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
 
@@ -16,6 +16,18 @@ export function StatusBar() {
 export function PanelStatus({ side }: { side: Side }) {
   const panel = useApp((state) => state.panels[side]);
   const showHidden = useApp((state) => state.showHidden);
+  const source = useApp((state) => state.panels[side === "left" ? "right" : "left"]);
+  if (panel.view === "preview") {
+    const row = previewTarget(source, showHidden);
+    return (
+      <div className="flex h-7 min-w-0 shrink-0 items-center gap-3 overflow-hidden border-t border-[var(--border)] px-3 text-xs text-[var(--muted)]">
+        {row && <span className="min-w-0 truncate">{row.name}</span>}
+        {row && <span className="shrink-0">{typeLabel(row)}</span>}
+        {row && !row.isDir && <span className="shrink-0">{formatBytes(row.size)}</span>}
+        {row && <span className="shrink-0">{formatWhen(row.modified)}</span>}
+      </div>
+    );
+  }
   const rows = fileRows(panel, showHidden).filter((row) => !row.up);
   const total = rows.reduce((sum, row) => sum + row.size, 0);
   const marked = panel.marked.length;

@@ -1,14 +1,23 @@
-export const ICON_MIN = 72;
-export const ICON_MAX = 256;
-export const ICON_DEFAULT = 112;
+export const ICON_COLUMNS_MIN = 1;
+export const ICON_COLUMNS_MAX = 12;
+export const ICON_COLUMNS_DEFAULT = 8;
 
-export function iconSizeOf(value: unknown): number {
-  const size = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : ICON_DEFAULT;
-  return Math.min(ICON_MAX, Math.max(ICON_MIN, size));
+// Old sessions stored a pixel cell size. Twelve of the old minimum (72px) fit a row.
+const LEGACY_ROW = 864;
+
+export function iconColumnsOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return ICON_COLUMNS_DEFAULT;
+  const size = Math.round(value);
+  if (size >= ICON_COLUMNS_MIN && size <= ICON_COLUMNS_MAX) return size;
+  if (size > ICON_COLUMNS_MAX) return Math.min(ICON_COLUMNS_MAX, Math.max(ICON_COLUMNS_MIN, Math.round(LEGACY_ROW / size)));
+  return ICON_COLUMNS_DEFAULT;
 }
 
-export function iconMetrics(size: number): { cell: number; glyph: number; row: number } {
-  const cell = iconSizeOf(size);
-  const glyph = Math.round(cell * 0.64);
-  return { cell, glyph, row: glyph + 52 };
+/** Slider position. The left end is 12 icons and the right end is 1. */
+export function iconZoomOf(columns: number): number {
+  return ICON_COLUMNS_MAX + ICON_COLUMNS_MIN - iconColumnsOf(columns);
+}
+
+export function iconColumnsFromZoom(zoom: number): number {
+  return iconColumnsOf(ICON_COLUMNS_MAX + ICON_COLUMNS_MIN - zoom);
 }

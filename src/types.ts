@@ -27,6 +27,11 @@ export interface Place {
   role?: string;
 }
 
+export interface NavPin {
+  name: string;
+  path: string;
+}
+
 export interface Panel {
   path: string;
   parent: string | null;
@@ -116,6 +121,8 @@ export type ModalState =
   | { type: "hostKey"; draft: SftpDraft; fingerprint: string; pinned: string | null; status: string }
   | { type: "sftpOffer"; offer: ConnectOffer }
   | { type: "servers" }
+  | { type: "connections" }
+  | { type: "forgetSftp"; id: string; label: string }
   | { type: "mcpTool"; tool: McpTool }
   | { type: "mcpConfirm"; tool: McpTool; values: Record<string, string> };
 
@@ -175,6 +182,8 @@ export interface ContextMenuState {
   y: number;
   side: Side;
   paths: string[];
+  pin?: string;
+  connectionId?: string;
 }
 
 export interface CmdChunk {

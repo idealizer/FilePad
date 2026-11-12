@@ -119,6 +119,9 @@ export default function App() {
   const outputHeight = useApp((state) => state.outputHeight);
   const terminalHeight = useApp((state) => state.terminalHeight);
   const nameTemplates = useApp((state) => state.nameTemplates);
+  const leftNav = useApp((state) => state.leftNav);
+  const rightNav = useApp((state) => state.rightNav);
+  const pins = useApp((state) => state.pins);
   const resolved = resolveTheme(theme);
   document.documentElement.dataset.theme = resolved;
 
@@ -144,7 +147,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates]);
+  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -254,6 +257,7 @@ export default function App() {
       const key = event.key;
       const mod = event.ctrlKey || event.metaKey;
       if (!mod && !event.altKey && fileNavKey(key) && !keepFieldKeys(event.target)) {
+        if (isTyping(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
         const el = document.activeElement;
@@ -264,7 +268,7 @@ export default function App() {
         live.moveCursor(step, event.shiftKey && (key === "ArrowDown" || key === "ArrowUp" || key === "PageDown" || key === "PageUp"));
         return;
       }
-      if (key === "F2") { event.preventDefault(); store.askRename(); return; }
+      if (key === "F2") { if (isTyping(event.target)) return; event.preventDefault(); store.askRename(); return; }
       if (key === "F3") { event.preventDefault(); store.previewOther(); return; }
       if (key === "F4") { event.preventDefault(); void store.openCurrent(); return; }
       if (key === "F5") { event.preventDefault(); void store.copyToOther(); return; }
@@ -280,11 +284,22 @@ export default function App() {
       if (mod && key.toLowerCase() === "k") { event.preventDefault(); store.setPalette(true); return; }
       if (mod && (key === "`" || event.code === "Backquote")) { event.preventDefault(); store.toggleTerminal(); return; }
       if (key === "Escape") {
+        if (isTyping(event.target)) return;
         const side = actionSide(store);
         const selected = store.panels.left.marked.length + store.panels.right.marked.length > 0 || store.panels[side].cursor >= 0;
         if (selected) store.clearMarks();
         else if (store.outputOpen) store.setOutputOpen(false);
         return;
+      }
+      if (key === "Enter" && !event.altKey && !mod && !event.repeat && !document.querySelector(".menu")) {
+        const commit = document.querySelector<HTMLButtonElement>("[data-trim-commit]");
+        const inTrim = event.target instanceof HTMLElement && Boolean(event.target.closest(".fp-trim, .fp-frame"));
+        if (commit && !commit.disabled && (!typing || inTrim)) {
+          event.preventDefault();
+          event.stopPropagation();
+          commit.click();
+          return;
+        }
       }
       if (typing) return;
       if (mod && key.toLowerCase() === "a") { event.preventDefault(); store.markAll(); return; }

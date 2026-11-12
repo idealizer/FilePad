@@ -7,6 +7,8 @@ import { treeRows } from "../lib/rows";
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
+import { FileName } from "./FileName";
+import { SortHead } from "./FileList";
 
 export function DirTree({ side }: { side: Side }) {
   const panel = useApp((state) => state.panels[side]);
@@ -28,7 +30,9 @@ export function DirTree({ side }: { side: Side }) {
   }, [panel.cursor, rows.length, virtualizer]);
 
   return (
-    <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SortHead side={side} />
+      <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
       {!rows.length && <div className="px-3 py-6 text-center text-[var(--muted)]">{panel.loading ? "Reading…" : "This folder is empty."}</div>}
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((item) => {
@@ -77,10 +81,11 @@ export function DirTree({ side }: { side: Side }) {
                 <span style={{ width: 22, minWidth: 22 }} />
               )}
               <FileIcon isDir={row.isDir} extension={row.extension} />
-              <span className="truncate">{row.name}</span>
+              <FileName className="min-w-0 flex-1 truncate" name={row.name} path={row.path} isDir={row.isDir} selected={item.index === panel.cursor} activate="slow" />
             </div>
           );
         })}
+      </div>
       </div>
     </div>
   );

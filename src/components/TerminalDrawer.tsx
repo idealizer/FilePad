@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import "@xterm/xterm/css/xterm.css";
-import { diskFolder, isRemotePath } from "../lib/format";
+import { diskFolder, isRemotePath, remoteParts } from "../lib/format";
 import { invoke, message } from "../lib/platform";
 import { dragHeight } from "./DragBar";
 import { useApp } from "../stores/appStore";
@@ -23,6 +23,10 @@ export function TerminalDrawer() {
   const setHeight = useApp((state) => state.setTerminalHeight);
   const theme = useApp((state) => state.theme);
   const toggleTerminal = useApp((state) => state.toggleTerminal);
+  const activePath = useApp((state) => state.panels[state.active].path);
+  const profiles = useApp((state) => state.sftpProfiles);
+  const remote = remoteParts(activePath);
+  const title = remote ? profiles.find((profile) => profile.id === remote.id)?.label.trim() || "Server" : "Terminal";
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
@@ -40,8 +44,9 @@ export function TerminalDrawer() {
     addon.fit();
     term.current = terminal;
     fit.current = addon;
-    const cwd = diskFolder(useApp.getState().panels[useApp.getState().active].path);
-    void invoke("terminal_open", { cwd, cols: terminal.cols, rows: terminal.rows }).catch((error: unknown) => {
+    const folder = useApp.getState().panels[useApp.getState().active].path;
+    const path = isRemotePath(folder) ? folder : diskFolder(folder);
+    void invoke("terminal_use", { path, cols: terminal.cols, rows: terminal.rows }).catch((error: unknown) => {
       started.current = false;
       toast("error", message(error));
     });
@@ -91,17 +96,15 @@ export function TerminalDrawer() {
         }}
       />
       <div className="flex h-8 items-center gap-2 px-2">
-        <span className="text-xs text-[var(--muted)]">Terminal</span>
+        <span className="text-xs text-[var(--muted)]">{title}</span>
         <span className="flex-1" />
         <button
           className="btn sm"
           onClick={() => {
             const folder = useApp.getState().panels[useApp.getState().active].path;
-            if (isRemotePath(folder)) {
-              toast("warning", "The terminal stays on this computer.");
-              return;
-            }
-            void invoke("terminal_cd", { path: diskFolder(folder) }).catch((error: unknown) => toast("error", message(error)));
+            const path = isRemotePath(folder) ? folder : diskFolder(folder);
+            const terminal = term.current;
+            void invoke("terminal_use", { path, cols: terminal?.cols ?? 80, rows: terminal?.rows ?? 24 }).catch((error: unknown) => toast("error", message(error)));
           }}
         >
           Use this folder

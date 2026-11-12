@@ -1,14 +1,47 @@
 import DOMPurify from "dompurify";
-import { ChevronLeft, ChevronRight, ClipboardCopy, Crop, FileText, FlipHorizontal, FlipVertical, FolderOpen, FolderOutput, FolderSearch, Mail, Printer, Replace, RotateCcw, RotateCw, Save, Share2, Table2 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { baseName, formatBytes, formatWhen, isPackedPath, typeLabel } from "../lib/format";
+import { ChevronLeft, ChevronRight, ClipboardCopy, Crop, FileText, FlipHorizontal, FlipVertical, FoldHorizontal, FolderOpen, FolderOutput, FolderSearch, Mail, PanelRight, PanelTop, Pause, Play, Plus, Printer, Replace, RotateCcw, RotateCw, Save, Share2, Square, SquareCheck, Table2, Volume2, VolumeX, X } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from "react";
+import { baseName, formatBytes, formatWhen, isPackedPath, isRemotePath, typeLabel } from "../lib/format";
 import { fileRows, treeRows } from "../lib/rows";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
 import { CodeView } from "./CodeView";
+import { FileName } from "./FileName";
 import { Dropdown, MenuItem } from "./Menu";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
 import type { DirListing, Entry, PreviewFile, Side, ThemeMode } from "../types";
+
+type PreviewChrome = {
+  beside: boolean;
+  setBeside: (next: boolean) => void;
+  setTools: Dispatch<SetStateAction<ReactNode>>;
+};
+
+const PreviewChromeContext = createContext<PreviewChrome>({
+  beside: true,
+  setBeside: () => {},
+  setTools: () => {},
+});
+
+let toolsBeside = true;
+const besideListeners = new Set<(value: boolean) => void>();
+
+function useToolsBeside(): [boolean, (next: boolean) => void] {
+  const [beside, setBeside] = useState(toolsBeside);
+  useEffect(() => {
+    const listen = (value: boolean) => setBeside(value);
+    besideListeners.add(listen);
+    setBeside(toolsBeside);
+    return () => {
+      besideListeners.delete(listen);
+    };
+  }, []);
+  const set = useCallback((next: boolean) => {
+    toolsBeside = next;
+    besideListeners.forEach((listen) => listen(next));
+  }, []);
+  return [beside, set];
+}
 
 const imageMime: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon",
@@ -27,6 +60,19 @@ export function PreviewPane({ side }: { side: Side }) {
   const file = treeRow && !treeRow.isDir
     ? { key: treeRow.key, name: treeRow.name, path: treeRow.path, isDir: false, size: treeRow.size, modified: treeRow.modified, extension: treeRow.extension, up: false }
     : row && !row.up && !row.isDir ? row : null;
+  const clickEntry = useApp((state) => state.clickEntry);
+  const toggleMark = useApp((state) => state.toggleMark);
+  const listed = sourcePanel.view === "tree" ? treeRows(sourcePanel, showHidden) : fileRows(sourcePanel, showHidden);
+  const marked = file !== null && sourcePanel.view !== "tree" && sourcePanel.marked.includes(file.path);
+  const neighbors = neighborFiles(listed, sourcePanel.cursor);
+  const stepFile = (index: number) => {
+    if (index < 0) return;
+    clickEntry(source, index);
+  };
+  const [trimming, setTrimming] = useState(false);
+  const [beside, setBeside] = useToolsBeside();
+  const [pictureTools, setPictureTools] = useState<ReactNode>(null);
+  const chrome = useMemo(() => ({ beside, setBeside, setTools: setPictureTools }), [beside, setBeside]);
   const [preview, setPreview] = useState<PreviewFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -66,7 +112,19 @@ export function PreviewPane({ side }: { side: Side }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
-        <span className="min-w-0 flex-1 truncate">{file ? file.name : treeRow?.name ?? row?.name ?? "Preview"}</span>
+        {file || (treeRow && treeRow.path) || (row && !row.up) ? (
+          <FileName
+            key={file?.path ?? treeRow?.path ?? row?.path}
+            className="min-w-0 flex-1 truncate"
+            name={file?.name ?? treeRow?.name ?? row?.name ?? ""}
+            path={file?.path ?? treeRow?.path ?? row?.path ?? ""}
+            isDir={file ? false : Boolean(treeRow?.isDir ?? row?.isDir)}
+            selected
+            activate="click"
+          />
+        ) : (
+          <span className="min-w-0 flex-1 truncate">{row?.up ? row.name : "Preview"}</span>
+        )}
         {file && <span className="text-xs text-[var(--muted)]">{formatBytes(file.size)}</span>}
         {preview?.kind === "csv" && (
           <div className="seg" role="tablist" aria-label="CSV view">
@@ -80,15 +138,31 @@ export function PreviewPane({ side }: { side: Side }) {
           <button className="btn sm" onClick={() => void openInTextpad()}>TextPad</button>
         )}
       </div>
-      <div className={`min-h-0 min-w-0 flex-1 ${preview?.kind === "slides" ? "overflow-hidden" : "overflow-auto"}`}>
-        {treeRow?.isDir && <ListingView listPath={treeRow.path} source={source} />}
-        {!treeRow && !row && <Empty text="Select a file in the other panel." />}
-        {!treeRow && row?.up && <Empty text="Parent folder" />}
-        {!treeRow && row?.isDir && !row.up && <ListingView listPath={row.path} source={source} />}
-        {file && loading && <Empty text="Reading…" />}
-        {file && error && <Empty text={error} />}
-        {file && !loading && preview && <Body preview={preview} source={source} theme={theme} tableOn={tableOn} onSaved={() => setTick((value) => value + 1)} />}
+      <PreviewChromeContext.Provider value={chrome}>
+      <div className="relative min-h-0 min-w-0 flex-1">
+        <div className={`h-full min-h-0 min-w-0 ${preview?.kind === "slides" || preview?.kind === "video" ? "overflow-hidden" : "overflow-auto"}`}>
+          {treeRow?.isDir && <ListingView listPath={treeRow.path} source={source} />}
+          {!treeRow && !row && <Empty text="Select a file in the other panel." />}
+          {!treeRow && row?.up && <Empty text="Parent folder" />}
+          {!treeRow && row?.isDir && !row.up && <ListingView listPath={row.path} source={source} />}
+          {file && loading && <Empty text="Reading…" />}
+          {file && error && <Empty text={error} />}
+          {file && !loading && preview && <Body preview={preview} source={source} theme={theme} tableOn={tableOn} onTrim={setTrimming} onSaved={() => setTick((value) => value + 1)} />}
+        </div>
+        {file && !trimming && (
+          <>
+            <button type="button" className="fp-step" data-side="prev" aria-label="Previous file" disabled={neighbors.prev < 0} onClick={() => stepFile(neighbors.prev)}><ChevronLeft /></button>
+            <button type="button" className="fp-step" data-side="next" aria-label="Next file" disabled={neighbors.next < 0} onClick={() => stepFile(neighbors.next)}><ChevronRight /></button>
+            {beside && pictureTools && <div className="fp-rail">{pictureTools}</div>}
+            {sourcePanel.view !== "tree" && (
+              <button type="button" className="fp-pick" data-on={marked ? "true" : undefined} data-tip={marked ? "Selected" : "Select file"} aria-pressed={marked} onClick={() => toggleMark(source, sourcePanel.cursor, false)}>
+                {marked ? <SquareCheck /> : <Square />}
+              </button>
+            )}
+          </>
+        )}
       </div>
+      </PreviewChromeContext.Provider>
     </div>
   );
 }
@@ -140,8 +214,9 @@ function Empty({ text }: { text: string }) {
   return <div className="flex h-full items-center justify-center px-6 text-center text-[var(--muted)]">{text}</div>;
 }
 
-function Body({ preview, source, theme, tableOn, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; tableOn: boolean; onSaved: () => void }) {
-  if (preview.kind === "image" && preview.dataBase64) return <ImageView key={preview.path} preview={preview} source={source} onSaved={onSaved} />;
+function Body({ preview, source, theme, tableOn, onTrim, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; tableOn: boolean; onTrim: (active: boolean) => void; onSaved: () => void }) {
+  if (preview.kind === "image" && preview.dataBase64) return <ImageView key={preview.path} preview={preview} source={source} onTrim={onTrim} onSaved={onSaved} />;
+  if (preview.kind === "video" && preview.extension !== "vob") return <VideoView key={preview.path} preview={preview} source={source} />;
   if (preview.kind === "audio" || preview.kind === "video") return <MediaView preview={preview} />;
   if (preview.kind === "zip") return <ZipView path={preview.path} source={source} />;
   if (preview.kind === "gz") return <GzView path={preview.path} source={source} />;
@@ -161,6 +236,23 @@ function Body({ preview, source, theme, tableOn, onSaved }: { preview: PreviewFi
   return <Empty text={`${preview.name} can't be previewed. Use Open to view it in another app.`} />;
 }
 
+function neighborFiles(rows: { isDir: boolean; up?: boolean }[], cursor: number) {
+  const indexes: number[] = [];
+  rows.forEach((row, index) => {
+    if (row.up || row.isDir) return;
+    indexes.push(index);
+  });
+  const at = indexes.indexOf(cursor);
+  if (at >= 0) return { prev: at > 0 ? indexes[at - 1] : -1, next: at < indexes.length - 1 ? indexes[at + 1] : -1 };
+  let prev = -1;
+  let next = -1;
+  for (const index of indexes) {
+    if (index < cursor) prev = index;
+    else { next = index; break; }
+  }
+  return { prev, next };
+}
+
 function clampOrigin(ox: number, oy: number, viewW: number, viewH: number, imgW: number, imgH: number) {
   const minX = viewW >= imgW ? imgW - viewW : 0;
   const maxX = viewW >= imgW ? 0 : imgW - viewW;
@@ -172,6 +264,8 @@ function clampOrigin(ox: number, oy: number, viewW: number, viewH: number, imgW:
   };
 }
 
+type TrimEdge = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
+
 function stillFormat(extension: string): string {
   const ext = extension.toLowerCase();
   if (ext === "jpg" || ext === "jpeg") return "jpg";
@@ -179,7 +273,65 @@ function stillFormat(extension: string): string {
   return "jpg";
 }
 
-function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source: Side; onSaved: () => void }) {
+function PictureActions({
+  dirty,
+  saving,
+  svg,
+  zipped,
+  canEdit,
+  tool,
+  onRotateLeft,
+  onRotateRight,
+  onMirror,
+  onFlip,
+  onSave,
+  onTool,
+}: {
+  dirty: boolean;
+  saving: boolean;
+  svg: boolean;
+  zipped: boolean;
+  canEdit: boolean;
+  tool: "" | "convert" | "trim";
+  onRotateLeft: () => void;
+  onRotateRight: () => void;
+  onMirror: () => void;
+  onFlip: () => void;
+  onSave: () => void;
+  onTool: (next: "convert" | "trim") => void;
+}) {
+  const blocked = svg ? "SVG pictures stay as they are." : zipped ? "Copy the picture out of the archive before saving a change." : "";
+  return (
+    <>
+      <button className="tb-btn" data-tip="Rotate left" onClick={onRotateLeft}><RotateCcw /></button>
+      <button className="tb-btn" data-tip="Rotate right" onClick={onRotateRight}><RotateCw /></button>
+      <button className="tb-btn" data-tip="Mirror" onClick={onMirror}><FlipHorizontal /></button>
+      <button className="tb-btn" data-tip="Flip" onClick={onFlip}><FlipVertical /></button>
+      <button className="tb-btn" data-active={tool === "trim"} disabled={!canEdit} data-tip={blocked || (canEdit ? "Trim" : "Can't read this picture's size.")} onClick={() => onTool("trim")}><Crop /></button>
+      <button className="tb-btn" data-active={tool === "convert"} disabled={!canEdit} data-tip={blocked || (canEdit ? "Convert" : "Can't read this picture's size.")} onClick={() => onTool("convert")}><Replace /></button>
+      <button
+        className="tb-btn"
+        disabled={!dirty || saving || svg || zipped}
+        data-tip={blocked || (saving ? "Saving…" : "Save the picture")}
+        style={dirty && !saving && !svg && !zipped ? { color: "var(--accent)" } : undefined}
+        onClick={onSave}
+      >
+        <Save />
+      </button>
+    </>
+  );
+}
+
+function ToolsPlaceButton() {
+  const { beside, setBeside } = useContext(PreviewChromeContext);
+  return (
+    <button type="button" className="tb-btn" data-tip={beside ? "Tools in the bar" : "Tools beside the arrows"} onClick={() => setBeside(!beside)}>
+      {beside ? <PanelTop /> : <PanelRight />}
+    </button>
+  );
+}
+
+function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile; source: Side; onTrim: (active: boolean) => void; onSaved: () => void }) {
   const [quarters, setQuarters] = useState(0);
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
@@ -197,8 +349,15 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
   const [background, setBackground] = useState<"white" | "black">("white");
   const [notice, setNotice] = useState("");
   const [savingTrim, setSavingTrim] = useState(false);
-  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [applied, setApplied] = useState(false);
+  const trimGeom = useRef({ x: 0, y: 0, w: 0, h: 0, sps: 1 });
+  const [viewZoom, setViewZoom] = useState(1);
+  const [pixels, setPixels] = useState({ w: preview.width, h: preview.height });
+  const [frame, setFrame] = useState({ w: 0, h: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef(viewZoom);
+  const scrollAnchor = useRef<{ left: number; top: number } | "center" | null>(null);
+  zoomRef.current = viewZoom;
   const cropRef = useRef<HTMLDivElement>(null);
   const seeded = useRef(false);
   const focused = useRef(false);
@@ -207,9 +366,52 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
   const zipped = isPackedPath(preview.path);
   const mime = preview.mime || imageMime[preview.extension] || "image/jpeg";
   const turned = quarters % 2 === 1;
-  const orientedW = turned ? preview.height : preview.width;
-  const orientedH = turned ? preview.width : preview.height;
+  const pixelW = pixels.w || preview.width;
+  const pixelH = pixels.h || preview.height;
+  const orientedW = turned ? pixelH : pixelW;
+  const orientedH = turned ? pixelW : pixelH;
   const canEdit = !svg && !zipped && orientedW > 0 && orientedH > 0;
+  const { beside, setTools } = useContext(PreviewChromeContext);
+  const saveTurn = () => {
+    setSaving(true);
+    void invoke("save_image", { path: preview.path, quarters, flipH, flipV })
+      .then(() => {
+        toast("success", "Picture saved.");
+        setQuarters(0);
+        setFlipH(false);
+        setFlipV(false);
+        onSaved();
+      })
+      .catch((reason: unknown) => toast("error", message(reason)))
+      .finally(() => setSaving(false));
+  };
+  const saveTurnRef = useRef(saveTurn);
+  saveTurnRef.current = saveTurn;
+  useLayoutEffect(() => {
+    if (!beside || tool === "trim") {
+      setTools(null);
+      return () => setTools(null);
+    }
+    setTools(
+      <div className="fp-rail-tools">
+        <PictureActions
+          dirty={dirty}
+          saving={saving}
+          svg={svg}
+          zipped={zipped}
+          canEdit={canEdit}
+          tool={tool}
+          onRotateLeft={() => setQuarters((value) => (value + 3) % 4)}
+          onRotateRight={() => setQuarters((value) => (value + 1) % 4)}
+          onMirror={() => setFlipH((value) => !value)}
+          onFlip={() => setFlipV((value) => !value)}
+          onSave={() => saveTurnRef.current()}
+          onTool={(next) => setTool((value) => (value === next ? "" : next))}
+        />
+      </div>,
+    );
+    return () => setTools(null);
+  }, [beside, canEdit, dirty, saving, setTools, svg, tool, zipped]);
   const viewW = outW > 0 && scale > 0 ? outW / scale : 0;
   const viewH = outH > 0 && scale > 0 ? outH / scale : 0;
   const zoom = Math.round(scale * 100);
@@ -229,6 +431,18 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
   }, [orientedW, orientedH]);
 
   useEffect(() => {
+    onTrim(tool === "trim");
+    return () => onTrim(false);
+  }, [tool, onTrim]);
+
+  const [seenPicture, setSeenPicture] = useState(preview.dataBase64);
+  if (seenPicture !== preview.dataBase64) {
+    setSeenPicture(preview.dataBase64);
+    setTool("");
+    setApplied(false);
+  }
+
+  useEffect(() => {
     if (!seeded.current || !outW || !outH || !orientedW || !orientedH) return;
     const min = Math.min(1, outW / orientedW, outH / orientedH);
     const nextScale = Math.min(8, Math.max(min, scale));
@@ -241,27 +455,60 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
   }, [orientedW, orientedH, outW, outH, scale, originX, originY]);
 
   useLayoutEffect(() => {
-    if (tool !== "trim") return;
     const node = stageRef.current;
-    if (!node || !outW || !outH) return;
-    const fit = () => {
-      const maxW = Math.max(1, node.clientWidth - 24);
-      const maxH = Math.max(1, Math.min(node.clientHeight - 24, window.innerHeight * 0.7));
-      const aspect = outW / outH;
-      let w = maxW;
-      let h = w / aspect;
-      if (h > maxH) {
-        h = maxH;
-        w = h * aspect;
-      }
-      const next = { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
-      setBox((prev) => (prev.w === next.w && prev.h === next.h ? prev : next));
-    };
-    fit();
-    const observer = new ResizeObserver(fit);
+    if (!node) return;
+    const measure = () => setFrame((prev) => (prev.w === node.clientWidth && prev.h === node.clientHeight ? prev : { w: node.clientWidth, h: node.clientHeight }));
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [tool, outW, outH]);
+  }, []);
+
+  const availW = Math.max(1, frame.w - 24);
+  const availH = Math.max(1, frame.h - 24);
+  let fitW = availW;
+  let fitH = orientedW > 0 && orientedH > 0 ? availW * (orientedH / orientedW) : availH;
+  if (orientedW > 0 && orientedH > 0 && fitH > availH) {
+    fitH = availH;
+    fitW = availH * (orientedW / orientedH);
+  }
+  const displayW = Math.max(1, Math.round(fitW * viewZoom));
+  const displayH = Math.max(1, Math.round(fitH * viewZoom));
+
+  useLayoutEffect(() => {
+    if (tool === "trim") return;
+    const node = stageRef.current;
+    const anchor = scrollAnchor.current;
+    if (!node || !anchor) return;
+    scrollAnchor.current = null;
+    if (anchor === "center") {
+      node.scrollLeft = Math.max(0, (node.scrollWidth - node.clientWidth) / 2);
+      node.scrollTop = Math.max(0, (node.scrollHeight - node.clientHeight) / 2);
+      return;
+    }
+    node.scrollLeft = anchor.left;
+    node.scrollTop = anchor.top;
+  }, [tool, viewZoom, displayW, displayH]);
+
+  useEffect(() => {
+    const node = stageRef.current;
+    if (!node || tool === "trim") return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const current = zoomRef.current;
+      const next = Math.min(8, Math.max(1, current * Math.exp(-event.deltaY * 0.0015)));
+      if (Math.abs(next - current) < 1e-4) return;
+      const rect = node.getBoundingClientRect();
+      const px = event.clientX - rect.left + node.scrollLeft;
+      const py = event.clientY - rect.top + node.scrollTop;
+      const ratio = next / current;
+      scrollAnchor.current = { left: px * ratio - (event.clientX - rect.left), top: py * ratio - (event.clientY - rect.top) };
+      setViewZoom(next);
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [tool]);
 
   useEffect(() => {
     if (tool !== "trim") {
@@ -271,7 +518,7 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
     if (focused.current || !cropRef.current) return;
     cropRef.current.focus();
     focused.current = true;
-  }, [tool, box.w, box.h]);
+  }, [tool, outW, outH, frame.w]);
 
   useEffect(() => {
     const node = stageRef.current;
@@ -279,21 +526,28 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
     const onWheel = (event: WheelEvent) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
-      const frame = cropRef.current?.getBoundingClientRect();
-      if (!frame?.width || !frame.height || !orientedW || !orientedH) return;
+      const geo = trimGeom.current;
+      const bounds = node.getBoundingClientRect();
+      if (!geo.w || !geo.sps || !orientedW || !orientedH) return;
       const current = view.current;
       if (!current.outW || !current.outH || !current.scale) return;
       const min = Math.min(1, current.outW / orientedW, current.outH / orientedH);
       const nextScale = Math.min(8, Math.max(min, current.scale * Math.exp(-event.deltaY * 0.0015)));
-      const px = Math.min(Math.max(event.clientX - frame.left, 0), frame.width);
-      const py = Math.min(Math.max(event.clientY - frame.top, 0), frame.height);
+      const srcX = (event.clientX - bounds.left - geo.x) / geo.sps;
+      const srcY = (event.clientY - bounds.top - geo.y) / geo.sps;
       const currentViewW = current.outW / current.scale;
       const currentViewH = current.outH / current.scale;
-      const srcX = current.originX + (px / frame.width) * currentViewW;
-      const srcY = current.originY + (py / frame.height) * currentViewH;
+      if (!currentViewW || !currentViewH) return;
       const nextViewW = current.outW / nextScale;
       const nextViewH = current.outH / nextScale;
-      const next = clampOrigin(srcX - (px / frame.width) * nextViewW, srcY - (py / frame.height) * nextViewH, nextViewW, nextViewH, orientedW, orientedH);
+      const next = clampOrigin(
+        srcX - (nextViewW / currentViewW) * (srcX - current.originX),
+        srcY - (nextViewH / currentViewH) * (srcY - current.originY),
+        nextViewW,
+        nextViewH,
+        orientedW,
+        orientedH,
+      );
       setScale(nextScale);
       setOriginX(next.x);
       setOriginY(next.y);
@@ -335,16 +589,36 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
     if (!viewW || !viewH) return;
     const stepX = dx / scale;
     const stepY = dy / scale;
-    const next = clampOrigin(originX - stepX, originY - stepY, viewW, viewH, orientedW, orientedH);
+    const next = clampOrigin(originX + stepX, originY + stepY, viewW, viewH, orientedW, orientedH);
     setOriginX(next.x);
     setOriginY(next.y);
   };
 
-  const dragPicture = (event: React.PointerEvent<HTMLDivElement>) => {
+  const image = (() => {
+    if (!orientedW || !orientedH || frame.w < 1 || frame.h < 1) return { x: 0, y: 0, w: 0, h: 0 };
+    const maxW = Math.max(1, frame.w - 24);
+    const maxH = Math.max(1, Math.min(frame.h - 24, window.innerHeight * 0.7));
+    const aspect = orientedW / orientedH;
+    let w = maxW;
+    let h = w / aspect;
+    if (h > maxH) {
+      h = maxH;
+      w = h * aspect;
+    }
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    return { x: Math.round((frame.w - w) / 2), y: Math.round((frame.h - h) / 2), w, h };
+  })();
+  const trimSps = orientedW > 0 ? image.w / orientedW : 0;
+  trimGeom.current = { x: image.x, y: image.y, w: image.w, h: image.h, sps: trimSps || 1 };
+  const cut = { x: originX * trimSps, y: originY * trimSps, w: viewW * trimSps, h: viewH * trimSps };
+  const crop = { x: image.x + cut.x, y: image.y + cut.y, w: cut.w, h: cut.h };
+
+  const dragBox = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (!rect.width || !rect.height || !viewW || !viewH) return;
+    const sps = trimGeom.current.sps;
+    if (!sps || !viewW || !viewH) return;
     const startX = event.clientX;
     const startY = event.clientY;
     const startOriginX = originX;
@@ -354,8 +628,8 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
     target.setPointerCapture(event.pointerId);
     const move = (ev: PointerEvent) => {
       const next = clampOrigin(
-        startOriginX - ((ev.clientX - startX) / rect.width) * viewW,
-        startOriginY - ((ev.clientY - startY) / rect.height) * viewH,
+        startOriginX + (ev.clientX - startX) / sps,
+        startOriginY + (ev.clientY - startY) / sps,
         viewW,
         viewH,
         orientedW,
@@ -381,6 +655,20 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
     const width = full ? orientedW : outW;
     const height = full ? orientedH : outH;
     if (width < 1 || height < 1) return;
+    const untouched =
+      !full &&
+      !dirty &&
+      Math.abs(scale - 1) < 0.001 &&
+      Math.abs(originX) < 0.5 &&
+      Math.abs(originY) < 0.5 &&
+      Math.abs(viewW - orientedW) < 0.5 &&
+      Math.abs(viewH - orientedH) < 0.5 &&
+      stillFormat(preview.extension) === format;
+    if (untouched) {
+      setTool("");
+      return;
+    }
+    if (!full) setApplied(true);
     setSavingTrim(true);
     void invoke<string>("trim_image", {
       path: preview.path,
@@ -400,64 +688,139 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
       .then((saved) => {
         toast("success", `Saved ${baseName(saved)}.`);
         void useApp.getState().refresh(source);
+        if (!full) onSaved();
       })
-      .catch((reason: unknown) => toast("error", message(reason)))
+      .catch((reason: unknown) => {
+        if (!full) setApplied(false);
+        toast("error", message(reason));
+      })
       .finally(() => setSavingTrim(false));
   };
 
-  const screenPerSource = viewW > 0 ? box.w / viewW : 0;
-  const imgScreenW = orientedW * screenPerSource;
-  const imgScreenH = orientedH * (viewH > 0 ? box.h / viewH : 0);
-  const imgLeft = -originX * screenPerSource;
-  const imgTop = -originY * (viewH > 0 ? box.h / viewH : 0);
+  const resizeTrim = (edge: TrimEdge, event: React.PointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!image.w || !viewW || !viewH || !scale || !trimSps) return;
+    const west = edge === "w" || edge === "nw" || edge === "sw";
+    const east = edge === "e" || edge === "ne" || edge === "se";
+    const north = edge === "n" || edge === "nw" || edge === "ne";
+    const south = edge === "s" || edge === "sw" || edge === "se";
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const start = { originX, originY, viewW, viewH, scale };
+    const sps = trimSps;
+    const limitW = orientedW;
+    const limitH = orientedH;
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      const minViewW = Math.max(1 / start.scale, 32 / sps);
+      const minViewH = Math.max(1 / start.scale, 32 / sps);
+      let nextViewW = start.viewW;
+      let nextViewH = start.viewH;
+      if (east || west) nextViewW = start.viewW + ((west ? -dx : dx) / sps);
+      if (north || south) nextViewH = start.viewH + ((north ? -dy : dy) / sps);
+      nextViewW = Math.min(Math.max(nextViewW, Math.min(minViewW, limitW)), limitW);
+      nextViewH = Math.min(Math.max(nextViewH, Math.min(minViewH, limitH)), limitH);
+      let left = west ? start.originX + start.viewW - nextViewW : start.originX;
+      let top = north ? start.originY + start.viewH - nextViewH : start.originY;
+      if (!(east || west)) {
+        nextViewW = start.viewW;
+        left = start.originX;
+      }
+      if (!(north || south)) {
+        nextViewH = start.viewH;
+        top = start.originY;
+      }
+      if (left < 0) {
+        if (west) nextViewW += left;
+        left = 0;
+      }
+      if (top < 0) {
+        if (north) nextViewH += top;
+        top = 0;
+      }
+      if (left + nextViewW > limitW) {
+        if (east) nextViewW = limitW - left;
+        else left = limitW - nextViewW;
+      }
+      if (top + nextViewH > limitH) {
+        if (south) nextViewH = limitH - top;
+        else top = limitH - nextViewH;
+      }
+      nextViewW = Math.min(Math.max(nextViewW, Math.min(minViewW, limitW)), limitW);
+      nextViewH = Math.min(Math.max(nextViewH, Math.min(minViewH, limitH)), limitH);
+      left = Math.min(Math.max(0, left), Math.max(0, limitW - nextViewW));
+      top = Math.min(Math.max(0, top), Math.max(0, limitH - nextViewH));
+      const nextOutW = Math.min(16000, Math.max(1, Math.round(nextViewW * start.scale)));
+      const nextOutH = Math.min(16000, Math.max(1, Math.round(nextViewH * start.scale)));
+      const usedW = nextOutW / start.scale;
+      const usedH = nextOutH / start.scale;
+      if (west) left = Math.min(Math.max(0, start.originX + start.viewW - usedW), Math.max(0, limitW - usedW));
+      else left = Math.min(Math.max(0, left), Math.max(0, limitW - usedW));
+      if (north) top = Math.min(Math.max(0, start.originY + start.viewH - usedH), Math.max(0, limitH - usedH));
+      else top = Math.min(Math.max(0, top), Math.max(0, limitH - usedH));
+      setOriginX(left);
+      setOriginY(top);
+      setOutW(nextOutW);
+      setOutH(nextOutH);
+      setWidthText(String(nextOutW));
+      setHeightText(String(nextOutH));
+    };
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="fp-tools">
-        <button className="tb-btn" data-tip="Rotate left" onClick={() => setQuarters((value) => (value + 3) % 4)}><RotateCcw /></button>
-        <button className="tb-btn" data-tip="Rotate right" onClick={() => setQuarters((value) => (value + 1) % 4)}><RotateCw /></button>
-        <button className="tb-btn" data-tip="Mirror" onClick={() => setFlipH((value) => !value)}><FlipHorizontal /></button>
-        <button className="tb-btn" data-tip="Flip" onClick={() => setFlipV((value) => !value)}><FlipVertical /></button>
-        <button
-          className="tb-btn"
-          disabled={!dirty || saving || svg || zipped}
-          data-tip={svg ? "SVG pictures stay as they are." : zipped ? "Copy the picture out of the archive before saving a change." : saving ? "Saving…" : "Save the picture"}
-          style={dirty && !saving && !svg && !zipped ? { color: "var(--accent)" } : undefined}
-          onClick={() => {
-            setSaving(true);
-            void invoke("save_image", { path: preview.path, quarters, flipH, flipV })
-              .then(() => {
-                toast("success", "Picture saved.");
-                setQuarters(0);
-                setFlipH(false);
-                setFlipV(false);
-                onSaved();
-              })
-              .catch((reason: unknown) => toast("error", message(reason)))
-              .finally(() => setSaving(false));
-          }}
-        >
-          <Save />
-        </button>
-        <button
-          className="tb-btn"
-          data-active={tool === "convert"}
-          disabled={!canEdit}
-          data-tip={svg ? "SVG pictures stay as they are." : zipped ? "Copy the picture out of the archive before saving a change." : canEdit ? "Convert" : "Can't read this picture's size."}
-          onClick={() => setTool((value) => (value === "convert" ? "" : "convert"))}
-        >
-          <Replace />
-        </button>
-        <button
-          className="tb-btn"
-          data-active={tool === "trim"}
-          disabled={!canEdit}
-          data-tip={svg ? "SVG pictures stay as they are." : zipped ? "Copy the picture out of the archive before saving a change." : canEdit ? "Trim" : "Can't read this picture's size."}
-          onClick={() => setTool((value) => (value === "trim" ? "" : "trim"))}
-        >
-          <Crop />
-        </button>
-        {preview.scaled && <span className="text-xs text-[var(--muted)]">Shown smaller. Save writes the full picture.</span>}
+        {(!beside || tool === "trim") && (
+          <PictureActions
+            dirty={dirty}
+            saving={saving}
+            svg={svg}
+            zipped={zipped}
+            canEdit={canEdit}
+            tool={tool}
+            onRotateLeft={() => setQuarters((value) => (value + 3) % 4)}
+            onRotateRight={() => setQuarters((value) => (value + 1) % 4)}
+            onMirror={() => setFlipH((value) => !value)}
+            onFlip={() => setFlipV((value) => !value)}
+            onSave={saveTurn}
+            onTool={(next) => setTool((value) => (value === next ? "" : next))}
+          />
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          {tool !== "trim" && (
+            <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
+              <input
+                className="fp-icon-size"
+                style={{ "--fp-icon-fill": `${((viewZoom - 1) / 7) * 100}%` } as CSSProperties}
+                type="range"
+                min={100}
+                max={800}
+                step={1}
+                value={Math.round(viewZoom * 100)}
+                aria-label="Zoom"
+                data-tip="Zoom. Ctrl + scroll zooms."
+                onChange={(event) => {
+                  scrollAnchor.current = "center";
+                  setViewZoom(Number(event.target.value) / 100);
+                }}
+              />
+              {Math.round(viewZoom * 100)}%
+            </label>
+          )}
+          {preview.scaled && <span className="text-xs text-[var(--muted)]">Shown smaller. Save writes the full picture.</span>}
+          <ToolsPlaceButton />
+        </div>
       </div>
       {tool && canEdit && (
         <div className="fp-trim">
@@ -475,13 +838,22 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
             </>
           )}
           <span className="text-xs text-[var(--muted)]">{orientedW} × {orientedH}</span>
-          <select className="field sm" value={format} onChange={(event) => setFormat(event.target.value)} aria-label="Format">
-            <option value="jpg">JPG</option>
-            <option value="png">PNG</option>
-            <option value="webp">WebP</option>
-            <option value="bmp">BMP</option>
-            <option value="gif">GIF</option>
-          </select>
+          <Dropdown
+            menuClass="fp-format-menu"
+            button={({ open, toggle }) => (
+              <button type="button" className="field sm fp-format" data-active={open} aria-label="Format" onClick={toggle}>
+                {format === "jpg" ? "JPG" : format === "png" ? "PNG" : format === "webp" ? "WebP" : format === "bmp" ? "BMP" : "GIF"}
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                {([["jpg", "JPG"], ["png", "PNG"], ["webp", "WebP"], ["bmp", "BMP"], ["gif", "GIF"]] as const).map(([value, label]) => (
+                  <MenuItem key={value} label={label} hint={format === value ? "✓" : undefined} onClick={() => { setFormat(value); close(); }} />
+                ))}
+              </>
+            )}
+          </Dropdown>
           {format === "jpg" && (
             <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
               Quality
@@ -489,8 +861,8 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
               {quality}
             </label>
           )}
-          {(format === "jpg" || format === "bmp") && (
-            <span className="seg">
+          {(format === "jpg" || format === "bmp") && ["png", "webp", "gif", "svg", "ico"].includes(preview.extension) && (
+            <span className="seg" data-tip="JPG and BMP can't keep see-through parts. Pick the color that fills them.">
               <button type="button" data-active={background === "white"} onClick={() => setBackground("white")}>White</button>
               <button type="button" data-active={background === "black"} onClick={() => setBackground("black")}>Black</button>
             </span>
@@ -498,61 +870,1262 @@ function ImageView({ preview, source, onSaved }: { preview: PreviewFile; source:
           <button
             className="btn sm primary"
             type="button"
+            data-trim-commit={tool === "trim" ? "" : undefined}
             disabled={savingTrim || (tool === "trim" && (!(Number(widthText) > 0) || !(Number(heightText) > 0) || outW < 1 || outH < 1))}
             onClick={() => saveExport(tool === "convert")}
           >
             Save
           </button>
           {notice && <span className="text-xs text-[var(--muted)]">{notice}</span>}
-          {tool === "trim" && <span className="text-xs text-[var(--muted)]">Ctrl + scroll zooms. Drag moves the picture.</span>}
+          {tool === "trim" && <span className="text-xs text-[var(--muted)]">Enter keeps the trim. Drag the box to move it. Drag an edge to resize. Ctrl + scroll zooms.</span>}
           {tool === "trim" && zoom !== 100 && <span className="text-xs text-[var(--muted)]">Save scales the picture to this size.</span>}
           {preview.extension === "gif" && <span className="text-xs text-[var(--muted)]">Animated GIFs become a single frame.</span>}
           {tool === "convert" && (format === "png" || format === "webp") && <span className="text-xs text-[var(--muted)]">This keeps every pixel. Photos are often larger than a JPG.</span>}
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-auto" ref={stageRef}>
-        <div className="fp-stage" data-trim={tool === "trim" ? "true" : undefined}>
-          {tool === "trim" && canEdit && box.w > 0 && viewW > 0 ? (
-            <div
-              ref={cropRef}
-              className="fp-window"
-              tabIndex={0}
-              style={{ width: box.w, height: box.h, background: format === "jpg" || format === "bmp" ? (background === "black" ? "#000" : "#fff") : "transparent" }}
-              onPointerDown={dragPicture}
-              onKeyDown={(event) => {
-                const step = event.shiftKey ? 10 : 1;
-                if (event.key === "ArrowLeft") nudge(-step, 0);
-                else if (event.key === "ArrowRight") nudge(step, 0);
-                else if (event.key === "ArrowUp") nudge(0, -step);
-                else if (event.key === "ArrowDown") nudge(0, step);
-                else return;
-                event.preventDefault();
-                event.stopPropagation();
-              }}
-            >
-              <div style={{ position: "absolute", left: imgLeft, top: imgTop, width: imgScreenW, height: imgScreenH }}>
+        <div className="fp-stage" data-trim={tool === "trim" ? "true" : undefined} data-zoom={tool !== "trim" && viewZoom > 1 ? "true" : undefined}>
+          {tool === "trim" && canEdit && image.w > 0 && crop.w > 0 ? (
+            <>
+              <div className="fp-photo" style={{ left: image.x, top: image.y, width: image.w, height: image.h, background: format === "jpg" || format === "bmp" ? (background === "black" ? "#000" : "#fff") : "transparent", clipPath: applied ? `inset(${cut.y}px ${Math.max(0, image.w - cut.x - cut.w)}px ${Math.max(0, image.h - cut.y - cut.h)}px ${cut.x}px)` : undefined }}>
                 <img
                   alt={preview.name}
                   src={`data:${mime};base64,${preview.dataBase64}`}
                   style={{
-                    width: turned ? imgScreenH : imgScreenW,
-                    height: turned ? imgScreenW : imgScreenH,
-                    left: "50%",
-                    top: "50%",
+                    width: turned ? image.h : image.w,
+                    height: turned ? image.w : image.h,
                     transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
                   }}
                 />
+                {!applied && <div className="fp-shade" style={{ left: 0, top: 0, width: "100%", height: cut.y }} />}
+                {!applied && <div className="fp-shade" style={{ left: 0, top: cut.y, width: cut.x, height: cut.h }} />}
+                {!applied && <div className="fp-shade" style={{ left: cut.x + cut.w, top: cut.y, right: 0, height: cut.h }} />}
+                {!applied && <div className="fp-shade" style={{ left: 0, top: cut.y + cut.h, right: 0, bottom: 0 }} />}
               </div>
-            </div>
+              {!applied && (
+              <div
+                ref={cropRef}
+                className="fp-frame"
+                tabIndex={0}
+                style={{ left: crop.x, top: crop.y, width: crop.w, height: crop.h }}
+                onPointerDown={dragBox}
+                onKeyDown={(event) => {
+                  const step = event.shiftKey ? 10 : 1;
+                  if (event.key === "ArrowLeft") nudge(-step, 0);
+                  else if (event.key === "ArrowRight") nudge(step, 0);
+                  else if (event.key === "ArrowUp") nudge(0, -step);
+                  else if (event.key === "ArrowDown") nudge(0, step);
+                  else return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+              >
+                {(["n", "s", "e", "w", "nw", "ne", "sw", "se"] as TrimEdge[]).map((edge) => (
+                  <div key={edge} className="fp-handle" data-edge={edge} onPointerDown={(event) => resizeTrim(edge, event)} />
+                ))}
+              </div>
+              )}
+            </>
           ) : (
-            <img
-              alt={preview.name}
-              src={`data:${mime};base64,${preview.dataBase64}`}
-              style={{ transform: `scaleY(${flipV ? -1 : 1}) scaleX(${flipH ? -1 : 1}) rotate(${quarters * 90}deg)` }}
-            />
+            <div
+              className="fp-shot"
+              data-pan={viewZoom > 1 ? "true" : undefined}
+              style={{ width: displayW, height: displayH }}
+              onPointerDown={(event) => {
+                if (viewZoom <= 1) return;
+                const scroller = stageRef.current;
+                if (!scroller) return;
+                event.preventDefault();
+                const startX = event.clientX;
+                const startY = event.clientY;
+                const startLeft = scroller.scrollLeft;
+                const startTop = scroller.scrollTop;
+                const target = event.currentTarget;
+                target.setPointerCapture(event.pointerId);
+                const move = (ev: PointerEvent) => {
+                  scroller.scrollLeft = startLeft - (ev.clientX - startX);
+                  scroller.scrollTop = startTop - (ev.clientY - startY);
+                };
+                const up = (ev: PointerEvent) => {
+                  target.removeEventListener("pointermove", move);
+                  target.removeEventListener("pointerup", up);
+                  if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+                };
+                target.addEventListener("pointermove", move);
+                target.addEventListener("pointerup", up);
+              }}
+            >
+              <img
+                alt={preview.name}
+                src={`data:${mime};base64,${preview.dataBase64}`}
+                onLoad={(event) => {
+                  const width = event.currentTarget.naturalWidth;
+                  const height = event.currentTarget.naturalHeight;
+                  if (width > 0 && height > 0) setPixels((prev) => (prev.w === width && prev.h === height ? prev : { w: width, h: height }));
+                }}
+                style={{
+                  width: turned ? displayH : displayW,
+                  height: turned ? displayW : displayH,
+                  transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
+                }}
+              />
+            </div>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+type VideoPreset = "original" | "youtube" | "tiktok" | "instagram" | "fourThree";
+
+type VideoInfo = { durationMs: number; width: number; height: number; hasAudio: boolean };
+
+const presetRatio: Record<Exclude<VideoPreset, "original">, number> = {
+  youtube: 16 / 9,
+  tiktok: 9 / 16,
+  instagram: 1,
+  fourThree: 4 / 3,
+};
+
+const soundExts = ["mp3", "m4a", "aac", "wav", "ogg", "oga", "flac", "opus"];
+
+const frameChoices: { id: VideoPreset; tip: string; wide: number; tall: number; free?: boolean }[] = [
+  { id: "original", tip: "Original", wide: 16, tall: 11, free: true },
+  { id: "youtube", tip: "16:9", wide: 18, tall: 10 },
+  { id: "fourThree", tip: "4:3", wide: 16, tall: 12 },
+  { id: "instagram", tip: "1:1", wide: 13, tall: 13 },
+  { id: "tiktok", tip: "9:16", wide: 8, tall: 14 },
+];
+
+function FrameMark({ wide, tall, free }: { wide: number; tall: number; free?: boolean }) {
+  return (
+    <span className="fp-ratio" data-free={free ? "true" : undefined} aria-hidden="true">
+      <i style={{ width: wide, height: tall }} />
+    </span>
+  );
+}
+
+function Volume({ value, disabled, onChange }: { value: number; disabled?: boolean; onChange: (value: number) => void }) {
+  return (
+    <input
+      className="fp-icon-size fp-vol"
+      type="range"
+      min={0}
+      max={100}
+      step={1}
+      value={value}
+      disabled={disabled}
+      aria-label="Volume"
+      data-tip={`Volume ${value}%`}
+      data-tip-pos="top"
+      style={{ "--fp-icon-fill": `${value}%` } as CSSProperties}
+      onChange={(event) => onChange(Number(event.target.value))}
+    />
+  );
+}
+
+function clock(ms: number) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`;
+}
+
+function frameNote(preset: VideoPreset, picture: { w: number; h: number } | null, movable: boolean) {
+  const cap = preset === "youtube" ? [1920, 1080] : preset === "tiktok" ? [1080, 1920] : preset === "instagram" ? [1080, 1080] : preset === "fourThree" ? [1440, 1080] : null;
+  const scales = !!cap && !!picture && (picture.w > cap[0] + 1 || picture.h > cap[1] + 1);
+  if (movable && scales) return "Drag the picture to move the frame. Save scales this down to fit.";
+  if (scales) return "Save scales this down to fit.";
+  return movable ? "Drag the picture to move the frame." : "The picture already has this shape.";
+}
+
+function cropDragSlices(cut: { x: number; y: number; w: number; h: number }, videoW: number, videoH: number) {
+  const barTop = videoH - 48;
+  const volTop = videoH - 132;
+  const volLeft = videoW - 44;
+  const top = cut.y;
+  const bottom = cut.y + cut.h;
+  const right = cut.x + cut.w;
+  const slices: { top: number; height: number; left: number; right: number }[] = [];
+  const upperEnd = Math.min(bottom, volTop);
+  if (upperEnd - top > 1) slices.push({ top: 0, height: upperEnd - top, left: 0, right: 0 });
+  const midTop = Math.max(top, volTop);
+  const midEnd = Math.min(bottom, barTop);
+  if (midEnd - midTop > 1) {
+    const rightInset = Math.max(0, right - volLeft);
+    if (cut.w - rightInset > 8) slices.push({ top: midTop - top, height: midEnd - midTop, left: 0, right: rightInset });
+  }
+  return slices;
+}
+
+function visualCrop(width: number, height: number, preset: VideoPreset, cropX: number, cropY: number) {
+  if (preset === "original" || width < 1 || height < 1) return null;
+  const ratio = presetRatio[preset];
+  const wide = width / height > ratio;
+  const w = wide ? height * ratio : width;
+  const h = wide ? height : width / ratio;
+  return { x: (width - w) * cropX, y: (height - h) * cropY, w, h };
+}
+
+function TimeSpan({
+  label,
+  start,
+  end,
+  duration,
+  disabled,
+  onChange,
+  onMove,
+  onSeek,
+  onSeekEnd,
+  handles = true,
+}: {
+  label: string;
+  start: number;
+  end: number;
+  duration: number;
+  disabled?: boolean;
+  onChange?: (which: "start" | "end", ms: number) => void;
+  onMove?: (startMs: number) => void;
+  onSeek?: (ms: number) => void;
+  onSeekEnd?: () => void;
+  handles?: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const span = Math.max(1, duration);
+  const from = Math.min(start, span);
+  const to = Math.min(Math.max(end, from), span);
+  const left = (from / span) * 100;
+  const width = ((to - from) / span) * 100;
+  const drag = (which: "start" | "end", event: ReactPointerEvent<HTMLButtonElement>) => {
+    const track = trackRef.current;
+    if (!track || disabled) return;
+    event.preventDefault();
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const move = (ev: PointerEvent) => {
+      const rect = track.getBoundingClientRect();
+      const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)) : 0;
+      onChange?.(which, Math.round(ratio * span));
+    };
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+  const dragBody = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = trackRef.current;
+    if (!track || !onMove || disabled) return;
+    event.preventDefault();
+    const originX = event.clientX;
+    const origin = from;
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const move = (ev: PointerEvent) => {
+      const rect = track.getBoundingClientRect();
+      const delta = rect.width > 0 ? ((ev.clientX - originX) / rect.width) * span : 0;
+      onMove(Math.round(origin + delta));
+    };
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+  const scrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = trackRef.current;
+    if (!track || !onSeek) return;
+    const hit = event.target as HTMLElement;
+    if (hit.closest(".fp-span-knob, .fp-span-fill")) return;
+    event.preventDefault();
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const at = (clientX: number) => {
+      const rect = track.getBoundingClientRect();
+      const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+      onSeek(Math.round(ratio * span));
+    };
+    at(event.clientX);
+    const move = (ev: PointerEvent) => at(ev.clientX);
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+      onSeekEnd?.();
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+  return (
+    <div className="fp-span" data-off={disabled ? "true" : undefined} data-scrub={onSeek ? "true" : undefined} ref={trackRef} onPointerDown={onSeek ? scrub : undefined}>
+      <div className="fp-span-line" />
+      <div className="fp-span-fill" data-move={onMove ? "true" : undefined} style={{ left: `${left}%`, width: `${width}%` }} onPointerDown={onMove ? dragBody : undefined} />
+      {handles && <button type="button" className="fp-span-knob" style={{ left: `${left}%` }} disabled={disabled} aria-label={`${label} start`} onPointerDown={(event) => drag("start", event)} />}
+      {handles && <button type="button" className="fp-span-knob" style={{ left: `${left + width}%` }} disabled={disabled} aria-label={`${label} end`} onPointerDown={(event) => drag("end", event)} />}
+    </div>
+  );
+}
+
+function VideoActions({
+  saving,
+  canSave,
+  ready,
+  saveTip,
+  onRotateLeft,
+  onRotateRight,
+  onMirror,
+  onFlip,
+  onSave,
+}: {
+  saving: boolean;
+  canSave: boolean;
+  ready: boolean;
+  saveTip: string;
+  onRotateLeft: () => void;
+  onRotateRight: () => void;
+  onMirror: () => void;
+  onFlip: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <>
+      <button className="tb-btn" disabled={saving} data-tip="Rotate left" onClick={onRotateLeft}><RotateCcw /></button>
+      <button className="tb-btn" disabled={saving} data-tip="Rotate right" onClick={onRotateRight}><RotateCw /></button>
+      <button className="tb-btn" disabled={saving} data-tip="Mirror" onClick={onMirror}><FlipHorizontal /></button>
+      <button className="tb-btn" disabled={saving} data-tip="Flip" onClick={onFlip}><FlipVertical /></button>
+      <button className="tb-btn" disabled={!canSave} data-tip={saveTip} style={ready ? { color: "var(--accent)" } : undefined} onClick={onSave}>
+        <Save />
+      </button>
+      {saving && <button className="tb-btn" data-tip="Cancel" onClick={() => void invoke("cancel_video")}><Square /></button>}
+    </>
+  );
+}
+
+function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [info, setInfo] = useState<VideoInfo | null>(null);
+  const [blocked, setBlocked] = useState("");
+  const [pixels, setPixels] = useState({ w: 0, h: 0 });
+  const [quarters, setQuarters] = useState(0);
+  const [flipH, setFlipH] = useState(false);
+  const [flipV, setFlipV] = useState(false);
+  const [preset, setPreset] = useState<VideoPreset>("original");
+  const [cropX, setCropX] = useState(0.5);
+  const [cropY, setCropY] = useState(0.5);
+  const [startMs, setStartMs] = useState(0);
+  const [endMs, setEndMs] = useState(0);
+  const [soundStart, setSoundStart] = useState(0);
+  const [soundEnd, setSoundEnd] = useState(0);
+  const [soundVol, setSoundVol] = useState(100);
+  const [extraPath, setExtraPath] = useState<string | null>(null);
+  const [extraDur, setExtraDur] = useState(0);
+  const [extraStart, setExtraStart] = useState(0);
+  const [extraEnd, setExtraEnd] = useState(0);
+  const [extraPlace, setExtraPlace] = useState(0);
+  const [extraVol, setExtraVol] = useState(100);
+  const [matched, setMatched] = useState(false);
+  const [songPlaying, setSongPlaying] = useState(false);
+  const [songHeld, setSongHeld] = useState(false);
+  const [songMs, setSongMs] = useState(0);
+  const [soundOpen, setSoundOpen] = useState(false);
+  const [draftPath, setDraftPath] = useState("");
+  const [mute, setMute] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [frame, setFrame] = useState({ w: 0, h: 0 });
+  const stageRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const extraAudio = useRef<HTMLAudioElement | null>(null);
+  const soundFollows = useRef(true);
+  const scrubbing = useRef(false);
+  const tailing = useRef(false);
+  const tailFrame = useRef(0);
+  const holding = useRef(false);
+  const resumeTail = useRef(false);
+  const gliding = useRef(false);
+  const songEdge = useRef(0);
+  const songOn = useRef(false);
+  const songAt = useRef(0);
+  const songFrame = useRef(0);
+  const extraVolRef = useRef(100);
+  const hearRef = useRef<(t: number, force: boolean) => void>(() => {});
+  const [playMs, setPlayMs] = useState(0);
+  const playRef = useRef(0);
+  const thumbVideo = useRef<HTMLVideoElement>(null);
+  const thumbTimer = useRef(0);
+  const [thumb, setThumb] = useState<{ left: number; top: number; ms: number } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const insetRef = useRef<HTMLDivElement>(null);
+  const packed = isPackedPath(preview.path) || isRemotePath(preview.path);
+  const turned = quarters % 2 === 1;
+  const naturalW = info?.width || pixels.w;
+  const naturalH = info?.height || pixels.h;
+  const orientedW = turned ? naturalH : naturalW;
+  const orientedH = turned ? naturalW : naturalH;
+  const trimmed = !!info && (startMs > 80 || endMs < info.durationMs - 80);
+  const heardFrom = Math.max(soundStart, startMs);
+  const heardTo = Math.min(soundEnd, endMs);
+  const soundCut = !!info && info.hasAudio && !mute && (heardFrom > startMs + 80 || heardTo < endMs - 80);
+  const levelDirty = !!info && info.hasAudio && !mute && soundVol !== 100;
+  const audioDirty = (mute && info?.hasAudio === true) || soundCut || levelDirty || !!extraPath;
+  const dirty = quarters !== 0 || flipH || flipV || preset !== "original" || audioDirty || trimmed;
+  const fitted = (() => {
+    if (!orientedW || !orientedH || frame.w < 2 || frame.h < 2) return null;
+    const maxW = Math.max(1, frame.w - 16);
+    const maxH = Math.max(1, frame.h - 16);
+    const aspect = orientedW / orientedH;
+    let w = maxW;
+    let h = w / aspect;
+    if (h > maxH) {
+      h = maxH;
+      w = h * aspect;
+    }
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    return { x: Math.round((frame.w - w) / 2), y: Math.round((frame.h - h) / 2), w, h };
+  })();
+  const picture = visualCrop(orientedW, orientedH, preset, cropX, cropY);
+  const movable = !!picture && (orientedW - picture.w > 2 || orientedH - picture.h > 2);
+  const cut = fitted && picture && movable
+    ? {
+        x: picture.x * (fitted.w / orientedW),
+        y: picture.y * (fitted.h / orientedH),
+        w: picture.w * (fitted.w / orientedW),
+        h: picture.h * (fitted.h / orientedH),
+      }
+    : null;
+
+  useEffect(() => {
+    let objectUrl = "";
+    let cancel = false;
+    if (preview.dataBase64) {
+      const copy = new Uint8Array(decodeBase64(preview.dataBase64));
+      objectUrl = URL.createObjectURL(new Blob([copy.buffer], { type: videoMime[preview.extension] ?? "video/mp4" }));
+      setUrl(objectUrl);
+    } else if (inTauri()) {
+      void import("@tauri-apps/api/core").then(({ convertFileSrc }) => {
+        if (!cancel) setUrl(convertFileSrc(preview.path));
+      });
+    }
+    return () => {
+      cancel = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [preview.path, preview.dataBase64, preview.extension]);
+
+  useEffect(() => {
+    let cancel = false;
+    setInfo(null);
+    setBlocked("");
+    void invoke<VideoInfo>("probe_video", { path: preview.path })
+      .then((next) => {
+        if (cancel) return;
+        setInfo(next);
+        setEndMs(next.durationMs);
+        setSoundStart(0);
+        setSoundEnd(next.durationMs);
+        soundFollows.current = true;
+      })
+      .catch((reason: unknown) => {
+        if (!cancel) setBlocked(message(reason));
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [preview.path]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !info) return;
+    const t = video.currentTime * 1000;
+    video.muted = mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
+    video.volume = soundVol / 100;
+    syncExtra(video);
+  }, [extraEnd, extraPlace, extraStart, extraVol, info, mute, soundEnd, soundStart, soundVol, url]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancel = false;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen<{ path: string; ratio: number }>("video-edit", (event) => {
+        if (event.payload.path === preview.path) setProgress(event.payload.ratio);
+      });
+      if (cancel) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancel = true;
+      unlisten?.();
+    };
+  }, [preview.path]);
+
+  useEffect(() => () => {
+    tailing.current = false;
+    songOn.current = false;
+    cancelAnimationFrame(tailFrame.current);
+    cancelAnimationFrame(songFrame.current);
+    window.clearTimeout(thumbTimer.current);
+  }, [preview.path]);
+
+  useEffect(() => {
+    extraAudio.current?.pause();
+    extraAudio.current = null;
+    if (!extraPath || !inTauri()) return;
+    let cancel = false;
+    let audio: HTMLAudioElement | null = null;
+    void import("@tauri-apps/api/core").then(({ convertFileSrc }) => {
+      if (cancel) return;
+      audio = new Audio(convertFileSrc(extraPath));
+      audio.preload = "auto";
+      extraAudio.current = audio;
+    });
+    return () => {
+      cancel = true;
+      audio?.pause();
+      if (extraAudio.current === audio) extraAudio.current = null;
+    };
+  }, [extraPath]);
+
+  useEffect(() => {
+    songOn.current = false;
+    cancelAnimationFrame(songFrame.current);
+    setSongPlaying(false);
+    setSongHeld(false);
+    setSongMs(0);
+    songAt.current = 0;
+    if (!extraPath) {
+      setExtraDur(0);
+      setMatched(false);
+      return;
+    }
+    setMatched(false);
+    let cancel = false;
+    void invoke<number>("probe_sound", { path: extraPath })
+      .then((ms) => {
+        if (cancel) return;
+        setExtraDur(ms);
+        setExtraPlace(0);
+        setExtraStart(0);
+        setExtraEnd(ms);
+      })
+      .catch((reason: unknown) => {
+        if (cancel) return;
+        toast("warning", message(reason));
+        const play = Math.max(100, endMs - startMs);
+        setExtraDur(play);
+        setExtraPlace(0);
+        setExtraStart(0);
+        setExtraEnd(play);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [extraPath]);
+
+  useEffect(() => {
+    if (!soundOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSoundOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [soundOpen]);
+
+  useLayoutEffect(() => {
+    const node = stageRef.current;
+    if (!node) return;
+    const measure = () => setFrame({ w: node.clientWidth, h: node.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const dragCrop = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!picture || !fitted || saving) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const slackX = orientedW - picture.w;
+    const slackY = orientedH - picture.h;
+    const start = { x: event.clientX, y: event.clientY, cx: cropX, cy: cropY };
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const move = (ev: PointerEvent) => {
+      const dx = ((ev.clientX - start.x) / fitted.w) * orientedW;
+      const dy = ((ev.clientY - start.y) / fitted.h) * orientedH;
+      setCropX(slackX > 1 ? Math.min(1, Math.max(0, (start.cx * slackX + dx) / slackX)) : 0.5);
+      setCropY(slackY > 1 ? Math.min(1, Math.max(0, (start.cy * slackY + dy) / slackY)) : 0.5);
+    };
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+
+  const songFile = extraDur > 0 ? extraDur : Math.max(extraEnd, extraStart);
+  songEdge.current = extraPath ? extraPlace + Math.max(0, extraEnd - extraStart) : 0;
+  extraVolRef.current = extraVol;
+  const timelineMs = info?.durationMs ?? 0;
+  const head = timelineMs > 0 ? Math.min(100, Math.max(0, (Math.min(playMs, timelineMs) / timelineMs) * 100)) : 0;
+  const songSlice = Math.max(0, extraEnd - extraStart);
+  const songHeard = songHeld ? songMs : null;
+  const songMark = songHeard !== null && songFile > 0 ? Math.min(100, Math.max(0, (songHeard / songFile) * 100)) : null;
+  const videoLen = Math.max(100, endMs - startMs);
+  const matchedFit = matched && Math.abs(songSlice - Math.min(videoLen, Math.max(100, songFile || videoLen))) < 80 && Math.abs(extraPlace - startMs) < 80;
+  const hear = (t: number, force: boolean) => {
+    const audio = extraAudio.current;
+    const video = videoRef.current;
+    if (!audio || !extraPath) return;
+    audio.volume = extraVol / 100;
+    if (songOn.current) return;
+    const slice = Math.max(0, extraEnd - extraStart);
+    const inside = t >= extraPlace - 40 && t < extraPlace + slice;
+    if (!inside || !(force || (video ? !video.paused : false))) {
+      audio.pause();
+      return;
+    }
+    const want = (extraStart + Math.max(0, t - extraPlace)) / 1000;
+    if (Math.abs(audio.currentTime - want) > (force && scrubbing.current ? 0.12 : 0.35)) audio.currentTime = want;
+    if (audio.paused) void audio.play().catch(() => {});
+  };
+  hearRef.current = hear;
+  const stopTail = () => {
+    tailing.current = false;
+    cancelAnimationFrame(tailFrame.current);
+  };
+  const startTail = (from: number) => {
+    songOn.current = false;
+    cancelAnimationFrame(songFrame.current);
+    setSongPlaying(false);
+    if (!info || songEdge.current <= info.durationMs + 80) return;
+    const end = songEdge.current;
+    const origin = Math.max(info.durationMs, Math.min(from, end));
+    if (origin >= end - 30) return;
+    tailing.current = true;
+    const video = videoRef.current;
+    if (video) {
+      holding.current = true;
+      video.pause();
+      video.currentTime = Math.max(0, info.durationMs - 50) / 1000;
+    }
+    playRef.current = origin;
+    setPlayMs(origin);
+    hearRef.current(origin, true);
+    const started = performance.now();
+    let shown = Math.floor(origin / 80);
+    const tick = (now: number) => {
+      if (!tailing.current) return;
+      const t = origin + (now - started);
+      if (t >= end) {
+        tailing.current = false;
+        playRef.current = end;
+        setPlayMs(end);
+        extraAudio.current?.pause();
+        return;
+      }
+      playRef.current = t;
+      const bucket = Math.floor(t / 80);
+      if (bucket !== shown) {
+        shown = bucket;
+        setPlayMs(t);
+        const scroll = scrollRef.current;
+        const inset = insetRef.current;
+        if (scroll && inset && timelineMs > 0) {
+          const x = (t / timelineMs) * inset.clientWidth;
+          const view = x - scroll.scrollLeft;
+          if (view < 48 || view > scroll.clientWidth - 48) {
+            gliding.current = true;
+            scroll.scrollLeft = Math.max(0, x - scroll.clientWidth * 0.35);
+            gliding.current = false;
+          }
+        }
+      }
+      hearRef.current(t, true);
+      tailFrame.current = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(tailFrame.current);
+    tailFrame.current = requestAnimationFrame(tick);
+  };
+  const seek = (ms: number) => {
+    if (!info) return;
+    const next = Math.max(0, Math.min(ms, timelineMs));
+    playRef.current = next;
+    setPlayMs(next);
+    const video = videoRef.current;
+    if (!video) return;
+    holding.current = true;
+    if (next >= info.durationMs) {
+      video.pause();
+      video.currentTime = Math.max(0, info.durationMs - 50) / 1000;
+    } else {
+      video.currentTime = next / 1000;
+    }
+    hear(next, scrubbing.current || tailing.current);
+  };
+  const scrubTo = (ms: number) => {
+    songOn.current = false;
+    cancelAnimationFrame(songFrame.current);
+    setSongPlaying(false);
+    resumeTail.current = tailing.current || videoRef.current?.paused === false;
+    stopTail();
+    scrubbing.current = true;
+    seek(ms);
+  };
+  const stopScrub = () => {
+    scrubbing.current = false;
+    setThumb(null);
+    const video = videoRef.current;
+    const duration = info?.durationMs ?? 0;
+    if (resumeTail.current && playRef.current >= duration - 80 && songEdge.current > duration + 80) {
+      startTail(playRef.current);
+      return;
+    }
+    if (resumeTail.current && video && playRef.current < duration - 80) {
+      holding.current = true;
+      video.currentTime = playRef.current / 1000;
+      void video.play().catch(() => {});
+      return;
+    }
+    resumeTail.current = false;
+    if (video?.paused) extraAudio.current?.pause();
+  };
+  const peekAt = (clientX: number, ms: number) => {
+    if (!info) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const box = scroll.getBoundingClientRect();
+    const width = 168;
+    const left = Math.min(box.right - width - 8, Math.max(box.left + 8, clientX - width / 2));
+    const frame = Math.max(0, Math.min(ms, Math.max(0, info.durationMs - 40)));
+    const node = thumbVideo.current;
+    if (node && Math.abs(node.currentTime * 1000 - frame) > 160) node.currentTime = frame / 1000;
+    setThumb({ left, top: Math.max(8, box.top - 118), ms });
+  };
+  const peekFromPointer = (clientX: number) => {
+    const inset = insetRef.current;
+    if (!inset || !info || saving) return;
+    const rect = inset.getBoundingClientRect();
+    const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+    peekAt(clientX, ratio * timelineMs);
+  };
+  const scrubRuler = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const inset = insetRef.current;
+    if (!inset || saving || !info) return;
+    event.preventDefault();
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    const at = (clientX: number) => {
+      const rect = inset.getBoundingClientRect();
+      const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+      const ms = Math.round(ratio * timelineMs);
+      scrubTo(ms);
+      peekAt(clientX, ms);
+    };
+    at(event.clientX);
+    const move = (ev: PointerEvent) => at(ev.clientX);
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+      stopScrub();
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+  const moveTrim = (which: "start" | "end", ms: number) => {
+    if (!info || saving) return;
+    if (which === "start") {
+      const next = Math.max(0, Math.min(ms, endMs - 100));
+      setStartMs(next);
+      if (soundFollows.current) setSoundStart(next);
+      seek(next);
+      return;
+    }
+    const next = Math.min(info.durationMs, Math.max(ms, startMs + 100));
+    setEndMs(next);
+    if (soundFollows.current) setSoundEnd(next);
+    seek(Math.max(0, next - 50));
+  };
+  const moveSound = (which: "start" | "end", ms: number) => {
+    if (!info || saving || mute || !info.hasAudio) return;
+    soundFollows.current = false;
+    if (which === "start") {
+      const next = Math.max(0, Math.min(ms, soundEnd - 100));
+      setSoundStart(next);
+      seek(next);
+      return;
+    }
+    const next = Math.min(info.durationMs, Math.max(ms, soundStart + 100));
+    setSoundEnd(next);
+    seek(Math.max(0, next - 50));
+  };
+  const stopSong = () => {
+    songOn.current = false;
+    cancelAnimationFrame(songFrame.current);
+    setSongPlaying(false);
+    setSongMs(songAt.current);
+    setSongHeld(true);
+    if (!tailing.current && videoRef.current?.paused !== false) extraAudio.current?.pause();
+  };
+  const playSongFrom = (from: number) => {
+    const audio = extraAudio.current;
+    const song = extraDur > 0 ? extraDur : 0;
+    if (!audio || song < 1) return;
+    const origin = Math.max(0, Math.min(from, Math.max(0, song - 30)));
+    songOn.current = true;
+    setSongPlaying(true);
+    setSongHeld(true);
+    songAt.current = origin;
+    setSongMs(origin);
+    const video = videoRef.current;
+    if (video && !video.paused) video.pause();
+    stopTail();
+    audio.volume = extraVolRef.current / 100;
+    audio.currentTime = origin / 1000;
+    void audio.play().catch(() => {});
+    const started = performance.now();
+    let shown = Math.floor(origin / 80);
+    const tick = (now: number) => {
+      if (!songOn.current) return;
+      const t = origin + (now - started);
+      if (t >= song) {
+        songOn.current = false;
+        songAt.current = song;
+        setSongMs(song);
+        setSongPlaying(false);
+        setSongHeld(true);
+        audio.pause();
+        return;
+      }
+      songAt.current = t;
+      audio.volume = extraVolRef.current / 100;
+      const bucket = Math.floor(t / 80);
+      if (bucket !== shown) {
+        shown = bucket;
+        setSongMs(t);
+      }
+      songFrame.current = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(songFrame.current);
+    songFrame.current = requestAnimationFrame(tick);
+  };
+  const toggleSong = () => {
+    if (songPlaying) {
+      stopSong();
+      return;
+    }
+    const from = songAt.current > 80 && songAt.current < songFile - 80 ? songAt.current : extraStart;
+    playSongFrom(from);
+  };
+  const scrubSong = (ms: number) => {
+    const song = extraDur > 0 ? extraDur : 0;
+    if (song < 1) return;
+    const next = Math.max(0, Math.min(ms, song));
+    songAt.current = next;
+    setSongMs(next);
+    setSongPlaying(true);
+    setSongHeld(true);
+    songOn.current = false;
+    cancelAnimationFrame(songFrame.current);
+    const video = videoRef.current;
+    if (video && !video.paused) video.pause();
+    stopTail();
+    const audio = extraAudio.current;
+    if (!audio) return;
+    audio.pause();
+    audio.volume = extraVolRef.current / 100;
+    try { audio.currentTime = next / 1000; } catch { /* not ready yet */ }
+  };
+  const stopSongScrub = () => playSongFrom(songAt.current);
+  const matchVideo = () => {
+    if (!info || saving || !extraPath) return;
+    const videoLen = Math.max(100, endMs - startMs);
+    const song = extraDur > 0 ? extraDur : videoLen;
+    const len = Math.min(videoLen, Math.max(100, song));
+    const already = matched && Math.abs(extraEnd - extraStart - len) < 80 && Math.abs(extraPlace - startMs) < 80;
+    if (already) {
+      setMatched(false);
+      return;
+    }
+    const start = Math.max(0, Math.min(extraStart, Math.max(0, song - len)));
+    setExtraStart(start);
+    setExtraEnd(start + len);
+    setExtraPlace(startMs);
+    setMatched(true);
+  };
+  const trimSong = (which: "start" | "end", ms: number) => {
+    if (!info || saving || !extraPath) return;
+    const song = extraDur > 0 ? extraDur : Math.max(extraEnd, ms);
+    setMatched(false);
+    if (which === "start") {
+      setExtraStart(Math.max(0, Math.min(ms, extraEnd - 100)));
+      return;
+    }
+    setExtraEnd(Math.min(song, Math.max(ms, extraStart + 100)));
+  };
+  const slideSong = (ms: number) => {
+    if (!info || saving || !extraPath) return;
+    const len = Math.max(100, extraEnd - extraStart);
+    const song = extraDur > 0 ? extraDur : len;
+    const next = Math.max(0, Math.min(ms, Math.max(0, song - len)));
+    setExtraStart(next);
+    setExtraEnd(next + len);
+  };
+  const syncExtra = (video: HTMLVideoElement) => {
+    if (scrubbing.current) return;
+    hear(video.currentTime * 1000, !video.paused);
+  };
+  const chooseSound = () => {
+    void invoke<string | null>("pick_sound_file")
+      .then((picked) => {
+        if (picked) setDraftPath(picked);
+      })
+      .catch((reason: unknown) => toast("error", message(reason)));
+  };
+  const addSound = () => {
+    const picked = draftPath.trim();
+    if (!picked || !info) {
+      toast("warning", "Choose a sound file.");
+      return;
+    }
+    const ext = picked.split(".").pop()?.toLowerCase() ?? "";
+    if (!soundExts.includes(ext) || isPackedPath(picked) || isRemotePath(picked)) {
+      toast("warning", "Choose a sound file on this computer.");
+      return;
+    }
+    setExtraPath(picked);
+    setExtraVol(100);
+    setSoundOpen(false);
+  };
+
+  const save = () => {
+    if (packed) return;
+    if (blocked) {
+      toast("error", blocked);
+      return;
+    }
+    if (!info) {
+      toast("warning", "Still reading that video.");
+      return;
+    }
+    if (!dirty || saving) return;
+    setSaving(true);
+    setProgress(0);
+    void invoke<string>("edit_video", {
+      path: preview.path,
+      startMs: Math.round(startMs),
+      endMs: Math.round(endMs),
+      preset,
+      cropX,
+      cropY,
+      quarters,
+      flipH,
+      flipV,
+      mute,
+      soundPath: extraPath,
+      soundStartMs: Math.round(soundStart),
+      soundEndMs: Math.round(soundEnd),
+      soundVolume: soundVol / 100,
+      extraStartMs: Math.round(extraStart),
+      extraEndMs: Math.round(extraEnd),
+      extraPlaceMs: Math.round(extraPlace),
+      extraVolume: extraVol / 100,
+    })
+      .then((saved) => {
+        toast("success", `Saved ${baseName(saved)}.`);
+        void useApp.getState().refresh(source);
+      })
+      .catch((reason: unknown) => {
+        const text = message(reason);
+        toast(text === "Save cancelled." ? "warning" : "error", text);
+      })
+      .finally(() => setSaving(false));
+  };
+
+  const percent = Math.round(progress * 100);
+  const saveTip = packed
+    ? "Copy the video out of the archive before saving a change."
+    : blocked
+      ? blocked
+      : saving
+        ? `Saving… ${percent}%`
+        : "Save the video";
+  const canSave = !(saving || packed || (!blocked && !dirty));
+  const ready = dirty && !saving && !packed && !blocked;
+  const { beside, setTools } = useContext(PreviewChromeContext);
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const videoActionProps = {
+    saving,
+    canSave,
+    ready,
+    saveTip,
+    onRotateLeft: () => setQuarters((value) => (value + 3) % 4),
+    onRotateRight: () => setQuarters((value) => (value + 1) % 4),
+    onMirror: () => setFlipH((value) => !value),
+    onFlip: () => setFlipV((value) => !value),
+    onSave: () => saveRef.current(),
+  };
+  useLayoutEffect(() => {
+    if (!beside) {
+      setTools(null);
+      return () => setTools(null);
+    }
+    setTools(
+      <div className="fp-rail-tools">
+        <VideoActions {...videoActionProps} />
+      </div>,
+    );
+    return () => setTools(null);
+  }, [beside, blocked, canSave, dirty, mute, packed, ready, saveTip, saving, setTools]);
+
+  return (
+    <div className="fp-video">
+      <div className="fp-tools">
+        {!beside && <VideoActions {...videoActionProps} />}
+        <div className="seg" role="group" aria-label="Frame">
+          {frameChoices.map((frame) => (
+            <button
+              key={frame.id}
+              type="button"
+              disabled={saving}
+              data-active={preset === frame.id}
+              data-tip={frame.tip}
+              aria-label={frame.tip}
+              onClick={() => {
+                setPreset(frame.id);
+                setCropX(0.5);
+                setCropY(0.5);
+              }}
+            >
+              <FrameMark wide={frame.wide} tall={frame.tall} free={frame.free} />
+            </button>
+          ))}
+        </div>
+        {saving && <span className="text-xs text-[var(--muted)]">{percent}%</span>}
+        {blocked && <span className="text-xs text-[var(--muted)]">{blocked}</span>}
+        {!blocked && preset !== "original" && naturalW > 0 && (
+          <span className="text-xs text-[var(--muted)]">{frameNote(preset, picture, movable)}</span>
+        )}
+        <div className="ml-auto"><ToolsPlaceButton /></div>
+      </div>
+      <div className="fp-video-stage" ref={stageRef}>
+        {!url ? <Empty text="Reading…" /> : (
+          <div className={fitted ? "fp-video-fit" : "fp-video-open"} style={fitted ? { left: fitted.x, top: fitted.y, width: fitted.w, height: fitted.h } : undefined}>
+            <video
+              ref={videoRef}
+              src={url}
+              controls
+              playsInline
+              style={fitted ? {
+                width: turned ? fitted.h : fitted.w,
+                height: turned ? fitted.w : fitted.h,
+                transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
+              } : undefined}
+              onLoadedMetadata={(event) => {
+                const node = event.currentTarget;
+                if (node.videoWidth > 0 && node.videoHeight > 0) setPixels({ w: node.videoWidth, h: node.videoHeight });
+              }}
+              onTimeUpdate={(event) => {
+                const video = event.currentTarget;
+                if (!info || tailing.current) return;
+                let t = video.currentTime * 1000;
+                video.muted = mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
+                video.volume = soundVol / 100;
+                syncExtra(video);
+                if (!video.paused && !(startMs <= 80 && endMs >= info.durationMs - 80) && (t >= endMs || t < startMs - 40)) {
+                  video.currentTime = startMs / 1000;
+                  t = startMs;
+                }
+                if (!scrubbing.current && !(video.paused && playRef.current > info.durationMs - 80)) {
+                  playRef.current = Math.round(t);
+                  setPlayMs(playRef.current);
+                }
+              }}
+              onPlay={(event) => {
+                songOn.current = false;
+                cancelAnimationFrame(songFrame.current);
+                setSongPlaying(false);
+                if (!info) return;
+                if (extraPath && playRef.current >= info.durationMs - 80 && songEdge.current > info.durationMs + 80) {
+                  event.currentTarget.pause();
+                  startTail(playRef.current);
+                  return;
+                }
+                stopTail();
+                syncExtra(event.currentTarget);
+              }}
+              onPause={(event) => {
+                if (scrubbing.current || tailing.current || songOn.current) return;
+                if (info && event.currentTarget.ended && songEdge.current > info.durationMs + 80) return;
+                extraAudio.current?.pause();
+              }}
+              onEnded={() => {
+                if (!info || scrubbing.current) return;
+                if (songEdge.current > info.durationMs + 80) startTail(info.durationMs);
+              }}
+              onSeeked={(event) => {
+                if (holding.current) {
+                  holding.current = false;
+                  return;
+                }
+                if (scrubbing.current || !info) return;
+                stopTail();
+                const t = Math.round(event.currentTarget.currentTime * 1000);
+                const duration = info.durationMs;
+                if (!(playRef.current > duration - 80 && event.currentTarget.paused)) {
+                  playRef.current = t;
+                  setPlayMs(t);
+                }
+                syncExtra(event.currentTarget);
+              }}
+              onError={() => setFailed(true)}
+            />
+            {fitted && cut && (
+              <>
+                <div className="fp-shade" style={{ left: 0, top: 0, width: "100%", height: cut.y }} />
+                <div className="fp-shade" style={{ left: 0, top: cut.y, width: cut.x, height: cut.h }} />
+                <div className="fp-shade" style={{ left: cut.x + cut.w, top: cut.y, right: 0, height: cut.h }} />
+                <div className="fp-shade" style={{ left: 0, top: cut.y + cut.h, right: 0, bottom: 0 }} />
+                <div className="fp-frame" data-move="true" style={{ left: cut.x, top: cut.y, width: cut.w, height: cut.h }}>
+                  {cropDragSlices(cut, fitted.w, fitted.h).map((slice) => (
+                    <div key={`${slice.top}-${slice.right}`} className="fp-frame-move" style={{ top: slice.top, height: slice.height, left: slice.left, right: slice.right }} onPointerDown={dragCrop} />
+                  ))}
+                  {(["n", "e", "w", "s"] as const).filter((edge) => edge !== "s" || cut.y + cut.h < fitted.h - 56).map((edge) => (
+                    <div key={edge} className="fp-handle" data-edge={edge} style={edge === "e" || edge === "w" ? { bottom: Math.max(16, cut.y + cut.h - (fitted.h - 48)) } : undefined} onPointerDown={dragCrop} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        {failed && <div className="absolute inset-x-0 bottom-3 text-center text-sm text-[var(--muted)]">This file won't play here. Use Open.</div>}
+      </div>
+      {info && info.durationMs > 0 && (
+        <div className="fp-time">
+          <div className="fp-time-labels">
+            <div className="fp-time-label fp-time-ruler-gap">
+              <span className="fp-span-label" />
+              <span className="fp-span-time">{clock(Math.min(playMs, info.durationMs))}</span>
+            </div>
+            <div className="fp-time-label">
+              <span className="fp-span-label">Video</span>
+              <span className="fp-span-time">{clock(startMs)}</span>
+            </div>
+            <div className="fp-time-label" data-tip={!info.hasAudio ? "This video has no sound" : mute ? "Muted" : undefined} data-tip-pos="top">
+              <span className="fp-span-label" data-off={saving || mute || !info.hasAudio ? "true" : undefined}>Sound</span>
+              <span className="fp-span-time" data-off={saving || mute || !info.hasAudio ? "true" : undefined}>{clock(soundStart)}</span>
+            </div>
+          </div>
+          <div className="fp-time-scroll" ref={scrollRef} onScroll={() => {
+            const inset = insetRef.current;
+            const scroll = scrollRef.current;
+            if (!inset || !scroll || !info || saving) return;
+            const box = scroll.getBoundingClientRect();
+            const center = box.left + box.width / 2;
+            const rect = inset.getBoundingClientRect();
+            const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (center - rect.left) / rect.width)) : 0;
+            if (gliding.current) return;
+            peekAt(center, ratio * timelineMs);
+            window.clearTimeout(thumbTimer.current);
+            thumbTimer.current = window.setTimeout(() => { if (!scrubbing.current) setThumb(null); }, 700);
+          }}>
+            <div className="fp-time-sheet">
+              <div className="fp-time-inset" ref={insetRef} onPointerMove={(event) => peekFromPointer(event.clientX)} onPointerLeave={() => { if (!scrubbing.current) setThumb(null); }}>
+                <div className="fp-ruler" data-tip="Drag to play from here" data-tip-pos="top" onPointerDown={saving ? undefined : scrubRuler} />
+                <div className="fp-time-track">
+                  <TimeSpan label="Video" start={startMs} end={endMs} duration={timelineMs} disabled={saving} onSeek={saving ? undefined : scrubTo} onSeekEnd={stopScrub} onChange={moveTrim} />
+                </div>
+                <div className="fp-time-track">
+                  <TimeSpan label="Sound" start={soundStart} end={soundEnd} duration={timelineMs} disabled={saving || mute || !info.hasAudio} onSeek={saving ? undefined : scrubTo} onSeekEnd={stopScrub} onChange={moveSound} />
+                </div>
+                <div className="fp-playmark" style={{ left: `${head}%` }} />
+                <div className="fp-playline" style={{ left: `${head}%` }} />
+              </div>
+            </div>
+          </div>
+          <div className="fp-time-sides">
+            <div className="fp-time-side fp-time-ruler-gap">
+              <span className="fp-span-time">{clock(timelineMs)}</span>
+              <span />
+            </div>
+            <div className="fp-time-side">
+              <span className="fp-span-time">{clock(endMs)}</span>
+              <span className="fp-span-side" />
+            </div>
+            <div className="fp-time-side">
+              <span className="fp-span-time" data-off={saving || mute || !info.hasAudio ? "true" : undefined}>{clock(soundEnd)}</span>
+              <span className="fp-span-side">
+                <button type="button" className="tb-btn" disabled={saving || !info.hasAudio} data-active={mute} data-tip={mute ? "Keep the sound" : "Mute"} onClick={() => setMute((value) => !value)}>
+                  {mute ? <VolumeX /> : <Volume2 />}
+                </button>
+                <Volume value={soundVol} disabled={saving || mute || !info.hasAudio} onChange={setSoundVol} />
+                {extraPath ? <span className="fp-slot" /> : (
+                  <button type="button" className="tb-btn" disabled={saving} data-tip="Add a sound" onClick={() => { setDraftPath(""); setSoundOpen(true); }}>
+                    <Plus />
+                  </button>
+                )}
+              </span>
+            </div>
+          </div>
+          {extraPath && (
+            <div className="fp-song-label" data-tip="Play, then pause. The marker stays, so you can drag the selection to it." data-tip-pos="top">
+              <button type="button" className="tb-btn" disabled={saving || extraDur < 1} data-tip={songPlaying ? "Stop the song" : "Play the song"} data-tip-pos="top" onClick={toggleSong}>
+                {songPlaying ? <Pause /> : <Play />}
+              </button>
+              <span className="fp-span-label">{baseName(extraPath)}</span>
+              <span className="fp-span-time">{clock(songHeld ? songMs : extraStart)}</span>
+            </div>
+          )}
+          {extraPath && (
+            <div className="fp-song-track">
+              <TimeSpan label={baseName(extraPath)} start={extraStart} end={extraEnd} duration={Math.max(1, songFile)} disabled={saving || extraDur < 1} onSeek={saving ? undefined : scrubSong} onSeekEnd={stopSongScrub} onMove={slideSong} onChange={trimSong} />
+              {songMark !== null && <div className="fp-playline fp-songline" style={{ left: `${songMark}%` }} />}
+            </div>
+          )}
+          {extraPath && (
+            <div className="fp-time-side fp-song-side">
+              <span className="fp-span-time">{clock(extraEnd)}</span>
+              <span className="fp-span-side">
+                <button type="button" className="tb-btn" disabled={saving || extraDur < 1} data-active={matched} data-tip={matchedFit ? "Unlock the length" : "Match the video length"} onClick={matchVideo}>
+                  <FoldHorizontal />
+                </button>
+                <Volume value={extraVol} disabled={saving} onChange={setExtraVol} />
+                <button type="button" className="tb-btn" disabled={saving} data-tip="Remove this sound" onClick={() => setExtraPath(null)}>
+                  <X />
+                </button>
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="fp-thumb" data-on={thumb ? "true" : undefined} style={thumb ? { left: thumb.left, top: thumb.top } : undefined}>
+        <video ref={thumbVideo} src={url ?? undefined} muted playsInline preload="auto" />
+        <span>{clock(thumb?.ms ?? playMs)}</span>
+      </div>
+      {soundOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 p-6" onMouseDown={() => setSoundOpen(false)}>
+          <div className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
+            <h2 className="text-base font-semibold">Add sound</h2>
+            <p className="mt-2 text-sm text-[var(--muted)]">The bar under the video is the whole song. Drag the block to choose a part, then match it to the video.</p>
+            <div className="mt-3 flex gap-2">
+              <input className="field min-w-0 flex-1" value={draftPath} placeholder="Sound file" onChange={(event) => setDraftPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addSound(); }} />
+              <button type="button" className="btn" onClick={chooseSound}>Browse</button>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" className="btn" onClick={() => setSoundOpen(false)}>Cancel</button>
+              <button type="button" className="btn primary" onClick={addSound}>Add</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

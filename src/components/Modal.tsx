@@ -7,7 +7,7 @@ import { invoke, message } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
 import type { ItemDetails } from "../types";
-import { HostKeyDialog, McpToolDialog, ServersDialog, SftpDialog, SftpOfferDialog, SftpResumeDialog } from "./RemoteDialogs";
+import { ConnectionsDialog, ForgetConnectionDialog, HostKeyDialog, McpToolDialog, ServersDialog, SftpDialog, SftpOfferDialog, SftpResumeDialog } from "./RemoteDialogs";
 
 export function ModalHost() {
   const modal = useApp((state) => state.modal);
@@ -31,6 +31,8 @@ export function ModalHost() {
         {modal.type === "sftpOffer" && <SftpOfferDialog />}
         {modal.type === "sftpResume" && <SftpResumeDialog />}
         {modal.type === "servers" && <ServersDialog />}
+        {modal.type === "connections" && <ConnectionsDialog />}
+        {modal.type === "forgetSftp" && <ForgetConnectionDialog />}
         {(modal.type === "mcpTool" || modal.type === "mcpConfirm") && <McpToolDialog />}
       </div>
     </div>
@@ -179,6 +181,7 @@ function Swatch({ id, name, color, custom, onChange, onReset }: { id: string; na
 function PropertiesDialog() {
   const modal = useApp((state) => state.modal);
   const closeModal = useApp((state) => state.closeModal);
+  const profiles = useApp((state) => state.sftpProfiles);
   const paths = modal?.type === "properties" ? modal.paths : [];
   const [items, setItems] = useState<ItemDetails[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -209,7 +212,7 @@ function PropertiesDialog() {
         {item && (
           <>
             <Property label="Name" value={item.name} />
-            <Property label="Path" value={displayPath(item.path)} />
+            <Property label="Path" value={displayPath(item.path, profiles)} />
             <Property label="Type" value={item.kind} />
             <Property label="Size" value={item.sizeKnown ? formatBytes(item.size) : "—"} />
             {item.counted && <Property label="Contains" value={contains(item)} />}
@@ -225,7 +228,7 @@ function PropertiesDialog() {
             <Property label="Files" value={String(items.filter((entry) => !entry.isDir).length)} />
             <Property label="Folders" value={String(items.filter((entry) => entry.isDir).length)} />
             <Property label="Size" value={knownCount ? formatBytes(known) : "—"} />
-            <Property label="Location" value={locations.length === 1 ? displayPath(locations[0]) : "More than one folder"} />
+            <Property label="Location" value={locations.length === 1 ? displayPath(locations[0], profiles) : "More than one folder"} />
           </>
         )}
       </div>

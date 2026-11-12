@@ -2,11 +2,13 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { armDrag, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
-import { ICON_MAX, iconMetrics } from "../lib/iconSize";
+import { iconColumnsOf } from "../lib/iconSize";
 import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { invoke } from "../lib/platform";
 import { useApp } from "../stores/appStore";
+import { FileName } from "./FileName";
+import { SortHead } from "./FileList";
 import type { Side } from "../types";
 
 const pictures = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
@@ -32,7 +34,7 @@ export function IconView({ side }: { side: Side }) {
   const openCurrent = useApp((state) => state.openCurrent);
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
-  const iconSize = panel.iconSize;
+  const columns = iconColumnsOf(panel.iconSize);
   const drag = useDragSession();
   const scrollLock = useApp((state) => state.scrollLock);
   const otherEntries = useApp((state) => state.panels[side === "left" ? "right" : "left"].entries);
@@ -41,7 +43,6 @@ export function IconView({ side }: { side: Side }) {
   const rows = fileRows(panel, showHidden);
   const parent = useRef<HTMLDivElement>(null);
   useLinkedScroll(side, parent);
-  const base = iconMetrics(iconSize);
   const [width, setWidth] = useState(0);
   useLayoutEffect(() => {
     const node = parent.current;
@@ -52,9 +53,8 @@ export function IconView({ side }: { side: Side }) {
     observer.observe(node);
     return () => observer.disconnect();
   }, [side]);
-  const available = Math.max(base.cell, width - 12);
-  const across = Math.max(1, Math.floor(available / (iconSize >= ICON_MAX ? ICON_MAX : base.cell)));
-  const cell = iconSize >= ICON_MAX ? available / across : base.cell;
+  const across = columns;
+  const cell = width > 0 ? Math.max(1, (width - 12) / across) : 112;
   const metrics = { cell, glyph: Math.round(cell * 0.64), row: Math.round(cell * 0.64) + 52 };
   useEffect(() => {
     setIconColumns(side, across);
@@ -67,7 +67,8 @@ export function IconView({ side }: { side: Side }) {
       event.preventDefault();
       const state = useApp.getState();
       state.setActive(side);
-      state.setIconSize(side, state.panels[side].iconSize + (event.deltaY < 0 ? 8 : -8));
+      const current = iconColumnsOf(state.panels[side].iconSize);
+      state.setIconSize(side, current + (event.deltaY < 0 ? -1 : 1));
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
@@ -93,11 +94,13 @@ export function IconView({ side }: { side: Side }) {
   }, [panel.cursor, rows.length, across, virtualizer]);
 
   return (
-    <div
-      ref={parent}
-      className="fp-icons min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
-      style={{ "--fp-icon": `${metrics.cell}px`, "--fp-glyph": `${metrics.glyph}px` } as CSSProperties}
-    >
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SortHead side={side} />
+      <div
+        ref={parent}
+        className="fp-icons min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
+        style={{ "--fp-icon": `${metrics.cell}px`, "--fp-glyph": `${metrics.glyph}px` } as CSSProperties}
+      >
       {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
       {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
       {!panel.error && !panel.loading && rows.length === 0 && <div className="px-3 py-6 text-center text-[var(--muted)]">This folder is empty.</div>}
@@ -158,12 +161,13 @@ export function IconView({ side }: { side: Side }) {
                   }}
                 >
                   <span className="fp-glyph">{pictures.has(row.extension) && !row.isDir ? <Picture path={row.path} row={row} /> : <FileIcon isDir={row.isDir} extension={row.extension} up={row.up} />}</span>
-                  <span>{row.name}</span>
+                  {row.up ? <span className="fp-name">{row.name}</span> : <FileName className="fp-name" name={row.name} path={row.path} isDir={row.isDir} selected={index === panel.cursor} activate="slow" />}
                 </div>
               );
             })}
           </div>
         ))}
+      </div>
       </div>
     </div>
   );

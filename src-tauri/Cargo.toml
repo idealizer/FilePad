@@ -30,7 +30,7 @@ deckcraft-render = "0.6.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62.2"
 russh = "0.65.1"
 russh-sftp = "3.0.1"

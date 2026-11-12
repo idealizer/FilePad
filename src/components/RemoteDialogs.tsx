@@ -18,7 +18,7 @@ export function SftpDialog() {
   const set = (patch: Partial<SftpDraft>) => setDraft((current) => ({ ...current, ...patch }));
   return (
     <>
-      <h2 className="text-base font-semibold">Connect with SFTP</h2>
+      <h2 className="text-base font-semibold">{draft.profileId ? "Edit connection" : "Connect with SFTP"}</h2>
       <div className="mt-3 grid min-w-0 gap-2">
         <label className="grid min-w-0 gap-1 text-sm">Connection name<input className="field w-full min-w-0" placeholder="A name you'll recognize" value={draft.label} onChange={(event) => set({ label: event.target.value })} /></label>
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
@@ -30,10 +30,11 @@ export function SftpDialog() {
         </datalist>
         <p className="text-xs text-[var(--muted)]">Pick 22 or 2222, or type another port. Use the SFTP host from the server. A website name on port 22 is often a different service.</p>
         <label className="grid min-w-0 gap-1 text-sm">User<input className="field w-full min-w-0" placeholder="Username on that server" spellCheck={false} value={draft.username} onChange={(event) => set({ username: event.target.value })} /></label>
-        <label className="grid min-w-0 gap-1 text-sm">Password<input className="field w-full min-w-0" type="password" placeholder="Leave blank if you use a key" value={draft.password} onChange={(event) => set({ password: event.target.value })} /></label>
-        <label className="grid min-w-0 gap-1 text-sm">Private key<textarea className="field h-20 w-full min-w-0 py-1 font-mono text-xs" placeholder="Paste a PEM key, or leave blank" value={draft.privateKey} onChange={(event) => set({ privateKey: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Password<input className="field w-full min-w-0" type="password" placeholder={draft.profileId ? "Leave blank to keep the saved password" : "Leave blank if you use a key"} value={draft.password} onChange={(event) => set({ password: event.target.value })} /></label>
+        <label className="grid min-w-0 gap-1 text-sm">Private key<textarea className="field h-20 w-full min-w-0 py-1 font-mono text-xs" placeholder={draft.profileId ? "Leave blank to keep the saved key" : "Paste a PEM key, or leave blank"} value={draft.privateKey} onChange={(event) => set({ privateKey: event.target.value })} /></label>
         <label className="grid min-w-0 gap-1 text-sm">Key passphrase<input className="field w-full min-w-0" type="password" placeholder="Only if the key has one" value={draft.passphrase} onChange={(event) => set({ passphrase: event.target.value })} /></label>
         <label className="grid min-w-0 gap-1 text-sm">Remote folder<input className="field w-full min-w-0" placeholder="/remote/folder" spellCheck={false} value={draft.remotePath} onChange={(event) => set({ remotePath: event.target.value })} /></label>
+        {draft.profileId && <p className="text-xs text-[var(--muted)]">A blank password or key keeps the one already saved.</p>}
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={closeModal}>Cancel</button>
@@ -221,6 +222,60 @@ export function ServersDialog() {
         <button className="btn primary" onClick={() => void save()}>Save</button>
       </div>
     </>
+  );
+}
+
+export function ConnectionsDialog() {
+  const modal = useApp((state) => state.modal);
+  const profiles = useApp((state) => state.sftpProfiles);
+  const closeModal = useApp((state) => state.closeModal);
+  const askSftp = useApp((state) => state.askSftp);
+  const editConnection = useApp((state) => state.editConnection);
+  const askForgetSftp = useApp((state) => state.askForgetSftp);
+  if (modal?.type !== "connections") return null;
+  return (
+    <>
+      <h2 className="text-base font-semibold">Connections</h2>
+      {profiles.length === 0 && <p className="mt-2 text-sm text-[var(--muted)]">No saved connections yet.</p>}
+      <ul className="mt-3 max-h-72 overflow-auto">
+        {profiles.map((profile) => (
+          <li key={profile.id} className="flex items-center gap-2 border-b border-[var(--border)] py-2">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm">{profile.label}</div>
+              <div className="truncate text-xs text-[var(--muted)]">{profile.host}:{profile.port} · {profile.remotePath}</div>
+            </div>
+            <button className="btn sm" type="button" onClick={() => editConnection(profile.id)}>Edit</button>
+            <button className="btn sm" type="button" onClick={() => askForgetSftp(profile.id)}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn" type="button" onClick={closeModal}>Close</button>
+        <button className="btn primary" type="button" onClick={() => askSftp()}>New connection</button>
+      </div>
+    </>
+  );
+}
+
+export function ForgetConnectionDialog() {
+  const modal = useApp((state) => state.modal);
+  const askConnections = useApp((state) => state.askConnections);
+  const confirmForgetSftp = useApp((state) => state.confirmForgetSftp);
+  if (modal?.type !== "forgetSftp") return null;
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void confirmForgetSftp();
+      }}
+    >
+      <h2 className="text-base font-semibold">Remove {modal.label}?</h2>
+      <p className="mt-2 text-sm text-[var(--muted)]">This deletes the saved connection. Panels still on it return to their last local folder.</p>
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn" type="button" onClick={askConnections}>Cancel</button>
+        <button className="btn danger" type="submit" autoFocus>Remove</button>
+      </div>
+    </form>
   );
 }
 

@@ -1,3 +1,8 @@
+export function pathKey(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, "");
+  return (trimmed || path.trim()).toLowerCase();
+}
+
 export function baseName(path: string): string {
   const parts = path.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
@@ -72,9 +77,12 @@ function packedBody(path: string): { prefix: "zip" | "gz"; archive: string; inne
   return { prefix, archive: body.slice(0, bar), inner: body.slice(bar + 1) };
 }
 
-export function displayPath(path: string): string {
+export function displayPath(path: string, connections: { id: string; label: string }[] = []): string {
   const remote = remoteParts(path);
-  if (remote) return `sftp ${remote.remote}`;
+  if (remote) {
+    const name = connections.find((item) => item.id === remote.id)?.label.trim() || "Server";
+    return `sftp / ${name} / ${remote.remote}`;
+  }
   const packed = packedBody(path);
   if (!packed) return path;
   const inner = packed.inner.replaceAll("/", "\\");
@@ -86,6 +94,8 @@ export function storePath(draft: string, current = ""): string {
   const lower = text.toLowerCase();
   if (lower.startsWith("sftp:")) return text;
   const remote = remoteParts(current);
+  const labeled = /^sftp\s+\/\s+.+?\s+\/\s+(\/.*)$/i.exec(text);
+  if (remote && labeled) return `sftp:${remote.id}:${labeled[1]}`;
   if (remote && (text.startsWith("/") || lower.startsWith("sftp "))) {
     const next = text.replace(/^sftp\s+/i, "");
     return `sftp:${remote.id}:${next.startsWith("/") ? next : `/${next}`}`;

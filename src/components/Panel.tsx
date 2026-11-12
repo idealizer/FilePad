@@ -1,12 +1,13 @@
-import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, LayoutGrid, List, MemoryStick, Monitor, Network, Search, Unplug, Usb } from "lucide-react";
+import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, Images, LayoutGrid, List, MemoryStick, Monitor, Network, PanelLeft, Pencil, Plus, Search, Trash2, Unplug, Usb } from "lucide-react";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useDragSession } from "../lib/drag";
 import { displayPath, isRemotePath, storePath } from "../lib/format";
-import { ICON_MAX, ICON_MIN } from "../lib/iconSize";
-import { fileRows } from "../lib/rows";
+import { ICON_COLUMNS_MAX, ICON_COLUMNS_MIN, iconColumnsFromZoom, iconColumnsOf, iconZoomOf } from "../lib/iconSize";
+import { fileRows, previewTarget } from "../lib/rows";
 import { useApp } from "../stores/appStore";
 import type { Side, ViewMode } from "../types";
 import { DirTree } from "./DirTree";
+import { PanelNav } from "./PanelNav";
 import { FileList } from "./FileList";
 import { IconView } from "./IconView";
 import { Dropdown, MenuItem } from "./Menu";
@@ -19,6 +20,7 @@ function placeIcon(place: { name: string; kind: string; role?: string }) {
     case "desktop": return <Monitor />;
     case "documents": return <FileText />;
     case "downloads": return <Download />;
+    case "pictures": return <Images />;
     case "removable": return <Usb />;
     case "remote": return <Network />;
     case "cd": return <Disc />;
@@ -46,12 +48,14 @@ export function Panel({ side }: { side: Side }) {
   const otherView = useApp((state) => state.panels[side === "left" ? "right" : "left"].view);
   const previewing = otherView === "preview" && panel.view !== "preview";
   const places = useApp((state) => state.places);
+  const navOpen = useApp((state) => (side === "left" ? state.leftNav : state.rightNav));
+  const toggleNav = useApp((state) => state.toggleNav);
   const recent = useApp((state) => state.recent);
   const sftpProfiles = useApp((state) => state.sftpProfiles);
   const loadPlaces = useApp((state) => state.loadPlaces);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
-  const shown = displayPath(panel.path);
+  const shown = displayPath(panel.path, sftpProfiles);
   const [draft, setDraft] = useState(shown);
   const [editing, setEditing] = useState(false);
   useEffect(() => {
@@ -80,10 +84,16 @@ export function Panel({ side }: { side: Side }) {
         if (target instanceof HTMLElement && !target.closest("input, textarea, button")) event.currentTarget.focus();
       }}
       onContextMenu={(event) => {
-        if (event.target instanceof Element && event.target.closest(".fp-row, input, button, a")) return;
+        if (event.target instanceof Element && event.target.closest(".fp-row, .fp-nav, input, button, a")) return;
         event.preventDefault();
         setActive(side);
         const state = useApp.getState();
+        if (panel.view === "preview") {
+          const source = side === "left" ? "right" : "left";
+          const target = previewTarget(state.panels[source], state.showHidden);
+          openContext({ x: event.clientX, y: event.clientY, side, paths: target ? [target.path] : [] });
+          return;
+        }
         const rows = panel.view === "tree" ? [] : fileRows(panel, state.showHidden);
         const row = rows[panel.cursor];
         const paths = panel.marked.length ? panel.marked : row && !row.up ? [row.path] : [];
@@ -91,6 +101,9 @@ export function Panel({ side }: { side: Side }) {
       }}
     >
       <div className="flex items-center gap-1 border-b border-[var(--border)] px-2 py-1.5">
+        <button type="button" className="tb-btn" data-active={navOpen} data-tip="Sidebar" data-tip-align="start" onClick={() => { setActive(side); toggleNav(side); }}>
+          <PanelLeft />
+        </button>
         <form
           className="min-w-0 flex-1"
           onSubmit={(event) => {
@@ -134,12 +147,34 @@ export function Panel({ side }: { side: Side }) {
                 <MenuItem key={place.path} icon={placeIcon(place)} label={place.name} title={place.path} onClick={() => { close(); void navigate(side, place.path); }} />
               ))}
               {recent.length > 0 && <div className="menu-sep" />}
-              {recent.length > 0 && <div className="menu-label">Recent</div>}
-              {recent.map((path) => (
-                <MenuItem key={path} icon={<Folder />} label={displayPath(path)} title={displayPath(path)} onClick={() => { close(); void navigate(side, path); }} />
-              ))}
+              {recent.length > 0 && (
+                <div className="menu-label menu-label-row">
+                  <span>Recent</span>
+                  <button type="button" className="menu-label-btn" onClick={() => useApp.getState().clearRecent()}>Clear</button>
+                </div>
+              )}
+              {recent.map((path) => {
+                const label = displayPath(path, sftpProfiles);
+                return (
+                  <div key={path} className="menu-recent">
+                    <button type="button" title={label} onClick={() => { close(); void navigate(side, path); }}>
+                      <Folder />
+                      <span className="min-w-0 flex-1 truncate">{label}</span>
+                    </button>
+                    <button type="button" className="menu-drop" data-tip="Remove" aria-label={`Remove ${label}`} onClick={() => useApp.getState().forgetRecent(path)}>
+                      <Trash2 />
+                    </button>
+                  </div>
+                );
+              })}
               <div className="menu-sep" />
-              <MenuItem icon={<Network />} label="Connect to SFTP" onClick={() => { close(); setActive(side); useApp.getState().askSftp(); }} />
+              <div className="menu-label menu-label-row">
+                <span>Connections</span>
+                <span className="menu-label-actions">
+                  <button type="button" className="menu-label-btn" data-tip="New" aria-label="New connection" onClick={() => { close(); setActive(side); useApp.getState().askSftp(); }}><Plus /></button>
+                  <button type="button" className="menu-label-btn" data-tip="Edit" aria-label="Edit connections" onClick={() => { close(); setActive(side); useApp.getState().askConnections(); }}><Pencil /></button>
+                </span>
+              </div>
               {isRemotePath(panel.path) && <MenuItem icon={<Network />} label="Disconnect" onClick={() => { close(); setActive(side); void useApp.getState().disconnectSftp(side); }} />}
               {sftpProfiles.map((profile) => (
                 <MenuItem key={profile.id} icon={<Network />} label={profile.label} title={`${profile.username}@${profile.host}`} onClick={() => {
@@ -185,28 +220,32 @@ export function Panel({ side }: { side: Side }) {
           <input className="field fp-filter h-7 w-full pl-7" placeholder="Filter" value={panel.filter} onChange={(event) => setFilter(side, event.target.value)} />
         </div>
       </div>
-      {panel.view === "preview" ? <PreviewPane side={side} /> : panel.view === "tree" ? <DirTree side={side} /> : panel.view === "icons" ? <IconView side={side} /> : <FileList side={side} />}
+      <div className="flex min-h-0 min-w-0 flex-1">
+        {navOpen && <PanelNav side={side} />}
+        {panel.view === "preview" ? <PreviewPane side={side} /> : panel.view === "tree" ? <DirTree side={side} /> : panel.view === "icons" ? <IconView side={side} /> : <FileList side={side} />}
+      </div>
       <PanelStatus side={side} />
     </section>
   );
 }
 
 function IconSize({ side }: { side: Side }) {
-  const size = useApp((state) => state.panels[side].iconSize);
+  const columns = iconColumnsOf(useApp((state) => state.panels[side].iconSize));
   const setIconSize = useApp((state) => state.setIconSize);
+  const zoom = iconZoomOf(columns);
   return (
     <input
       className="fp-icon-size"
-      style={{ "--fp-icon-fill": `${((size - ICON_MIN) / (ICON_MAX - ICON_MIN)) * 100}%` } as CSSProperties}
+      style={{ "--fp-icon-fill": `${((zoom - ICON_COLUMNS_MIN) / (ICON_COLUMNS_MAX - ICON_COLUMNS_MIN)) * 100}%` } as CSSProperties}
       type="range"
-      min={ICON_MIN}
-      max={ICON_MAX}
-      step={4}
-      value={size}
-      aria-label="Icon size"
-      data-tip={`Icon size ${size}`}
+      min={ICON_COLUMNS_MIN}
+      max={ICON_COLUMNS_MAX}
+      step={1}
+      value={zoom}
+      aria-label="Icons per row"
+      data-tip={`${columns} per row`}
       onPointerDown={() => useApp.getState().setActive(side)}
-      onChange={(event) => setIconSize(side, Number(event.target.value))}
+      onChange={(event) => setIconSize(side, iconColumnsFromZoom(Number(event.target.value)))}
     />
   );
 }

@@ -1,10 +1,12 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
@@ -193,6 +195,56 @@ pub fn disconnect(id: &str) -> Result<(), String> {
     call(Op::Disconnect(id.to_string()))
 }
 
+pub fn exec_command(app: AppHandle, id: String, cwd: String, command: String) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Err("Enter a command.".into());
+    }
+    call(Op::Exec { app, id, cwd, command })
+}
+
+pub fn cancel_exec(id: &str) {
+    let Some(tx) = EXEC_STOP.lock().ok().and_then(|mut jobs| jobs.remove(id)) else { return };
+    let _ = tx.send(());
+}
+
+pub fn shell_open(app: AppHandle, id: &str, remote: &str, cols: u16, rows: u16) -> Result<(), String> {
+    let same = SHELL.lock().ok().and_then(|guard| {
+        guard.as_ref().filter(|link| link.profile == id).map(|link| link.tx.clone())
+    });
+    if let Some(tx) = same {
+        let _ = tx.send(ShellNote::Resize { cols: u32::from(cols.max(20)), rows: u32::from(rows.max(8)) });
+        return tx.send(ShellNote::Data(cd_bytes(remote))).map_err(|_| "The server shell closed.".to_string());
+    }
+    shell_close();
+    call(Op::ShellOpen { app, id: id.to_string(), remote: remote.to_string(), cols, rows })
+}
+
+pub fn shell_write(data: &[u8]) -> Result<bool, String> {
+    let guard = SHELL.lock().map_err(|err| err.to_string())?;
+    let Some(link) = guard.as_ref() else { return Ok(false) };
+    link.tx.send(ShellNote::Data(data.to_vec())).map_err(|_| "The server shell closed.".to_string())?;
+    Ok(true)
+}
+
+pub fn shell_resize(cols: u16, rows: u16) -> Result<bool, String> {
+    let guard = SHELL.lock().map_err(|err| err.to_string())?;
+    let Some(link) = guard.as_ref() else { return Ok(false) };
+    link.tx.send(ShellNote::Resize { cols: u32::from(cols.max(20)), rows: u32::from(rows.max(8)) }).map_err(|_| "The server shell closed.".to_string())?;
+    Ok(true)
+}
+
+pub fn shell_close() {
+    let Some(link) = SHELL.lock().ok().and_then(|mut guard| guard.take()) else { return };
+    let _ = link.tx.send(ShellNote::Close);
+}
+
+fn shell_close_profile(id: &str) {
+    let close = SHELL.lock().ok().and_then(|guard| guard.as_ref().filter(|link| link.profile == id).map(|_| ()));
+    if close.is_some() {
+        shell_close();
+    }
+}
+
 pub fn stash_secret(password: Option<String>, private_key: Option<String>, passphrase: Option<String>) -> Result<String, String> {
     let id = format!("pending-{}", fresh_id());
     let secret = Secret { password, private_key, passphrase };
@@ -215,6 +267,8 @@ enum Op {
     Profiles,
     Forget(String),
     Disconnect(String),
+    Exec { app: AppHandle, id: String, cwd: String, command: String },
+    ShellOpen { app: AppHandle, id: String, remote: String, cols: u16, rows: u16 },
 }
 
 enum Out {
@@ -314,7 +368,7 @@ impl Pool {
 }
 
 struct Live {
-    _handle: russh::client::Handle<KeyCheck>,
+    handle: russh::client::Handle<KeyCheck>,
     sftp: russh_sftp::client::SftpSession,
 }
 
@@ -378,6 +432,7 @@ async fn dispatch(sessions: &mut HashMap<String, Live>, op: Op) -> Result<Out, S
         Op::Transfer { app, sources, dest, overwrite, relocate } => Ok(Out::Transfer(transfer_remote(sessions, &app, &sources, &dest, overwrite, relocate).await?)),
         Op::Profiles => Ok(Out::Profiles(load_disk().profiles.into_iter().map(public_profile).collect())),
         Op::Forget(id) => {
+            shell_close_profile(&id);
             sessions.remove(&id);
             let mut disk = load_disk();
             disk.profiles.retain(|profile| profile.id != id);
@@ -386,7 +441,16 @@ async fn dispatch(sessions: &mut HashMap<String, Live>, op: Op) -> Result<Out, S
             let _ = fs::remove_dir_all(temp_root().join(&id));
             Ok(Out::Unit)
         }
+        Op::Exec { app, id, cwd, command } => {
+            exec_remote(sessions, app, id, cwd, command).await?;
+            Ok(Out::Unit)
+        }
+        Op::ShellOpen { app, id, remote, cols, rows } => {
+            shell_remote(sessions, app, id, remote, cols, rows).await?;
+            Ok(Out::Unit)
+        }
         Op::Disconnect(id) => {
+            shell_close_profile(&id);
             if let Some(live) = sessions.remove(&id) {
                 let _ = live.sftp.close().await;
             }
@@ -592,7 +656,7 @@ async fn connect_live(profile: &Profile, secret: &Secret, allow: Option<String>)
     let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|_| OpenFail::Message("Can't start SFTP.".into()))?;
     sftp.set_timeout(120);
     let fingerprint = seen.lock().map(|value| value.clone()).unwrap_or_default();
-    Ok((Live { _handle: handle, sftp }, fingerprint))
+    Ok((Live { handle, sftp }, fingerprint))
 }
 
 async fn ensure<'a>(sessions: &'a mut HashMap<String, Live>, id: &str) -> Result<&'a russh_sftp::client::SftpSession, String> {
@@ -1189,6 +1253,138 @@ fn unique_file(dir: &Path, name: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem}-{}", fresh_id()))
+}
+
+struct ShellLink {
+    token: u64,
+    profile: String,
+    tx: tokio::sync::mpsc::UnboundedSender<ShellNote>,
+}
+
+enum ShellNote {
+    Data(Vec<u8>),
+    Resize { cols: u32, rows: u32 },
+    Close,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CmdChunk {
+    id: String,
+    text: String,
+    done: bool,
+    code: Option<i32>,
+}
+
+static SHELL: Mutex<Option<ShellLink>> = Mutex::new(None);
+static SHELL_TOKEN: AtomicU64 = AtomicU64::new(1);
+static EXEC_STOP: LazyLock<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<()>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn sh_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn cd_bytes(remote: &str) -> Vec<u8> {
+    format!("cd {}\n", sh_quote(remote)).into_bytes()
+}
+
+async fn open_channel(sessions: &mut HashMap<String, Live>, id: &str) -> Result<russh::Channel<russh::client::Msg>, String> {
+    ensure(sessions, id).await?;
+    let live = sessions.get(id).ok_or_else(|| "Connect to this server again.".to_string())?;
+    live.handle.channel_open_session().await.map_err(|_| "Can't open a command on this server.".to_string())
+}
+
+async fn exec_remote(sessions: &mut HashMap<String, Live>, app: AppHandle, id: String, cwd: String, command: String) -> Result<(), String> {
+    let (profile, remote) = split(&cwd).ok_or_else(|| "That isn't a server folder.".to_string())?;
+    let mut channel = open_channel(sessions, &profile).await?;
+    let script = format!("cd {} && {}", sh_quote(&remote), command);
+    channel.exec(true, format!("sh -c {}", sh_quote(&script))).await.map_err(|_| "Can't run that command on the server.".to_string())?;
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Ok(mut jobs) = EXEC_STOP.lock() {
+        jobs.insert(id.clone(), stop_tx);
+    }
+    tokio::spawn(async move {
+        let mut code = None;
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop_rx.recv() => break,
+                msg = channel.wait() => {
+                    match msg {
+                        Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                            let text = String::from_utf8_lossy(data.as_ref()).to_string();
+                            let _ = app.emit("cmd-output", CmdChunk { id: id.clone(), text, done: false, code: None });
+                        }
+                        Some(russh::ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status as i32),
+                        Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Ok(mut jobs) = EXEC_STOP.lock() {
+            jobs.remove(&id);
+        }
+        let _ = app.emit("cmd-output", CmdChunk { id, text: String::new(), done: true, code });
+    });
+    Ok(())
+}
+
+async fn shell_remote(sessions: &mut HashMap<String, Live>, app: AppHandle, id: String, remote: String, cols: u16, rows: u16) -> Result<(), String> {
+    let channel = open_channel(sessions, &id).await?;
+    let modes: &[(russh::Pty, u32)] = &[];
+    channel.request_pty(true, "xterm-256color", u32::from(cols.max(20)), u32::from(rows.max(8)), 0, 0, modes).await.map_err(|_| "This server has no terminal.".to_string())?;
+    channel.request_shell(true).await.map_err(|_| "This server has no shell.".to_string())?;
+    let (mut read, write) = channel.split();
+    let mut writer = write.make_writer();
+    let token = SHELL_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let (tx, mut notes) = tokio::sync::mpsc::unbounded_channel();
+    if let Ok(mut guard) = SHELL.lock() {
+        if let Some(old) = guard.replace(ShellLink { token, profile: id, tx }) {
+            let _ = old.tx.send(ShellNote::Close);
+        }
+    }
+    let start = cd_bytes(&remote);
+    tokio::spawn(async move {
+        let _ = writer.write_all(&start).await;
+        let _ = writer.flush().await;
+        loop {
+            tokio::select! {
+                note = notes.recv() => {
+                    match note {
+                        Some(ShellNote::Data(bytes)) => {
+                            if writer.write_all(&bytes).await.is_err() || writer.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(ShellNote::Resize { cols, rows }) => {
+                            let _ = write.window_change(cols, rows, 0, 0).await;
+                        }
+                        Some(ShellNote::Close) | None => break,
+                    }
+                }
+                msg = read.wait() => {
+                    match msg {
+                        Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(data.as_ref());
+                            if app.emit("term-data", encoded).is_err() {
+                                break;
+                            }
+                        }
+                        Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let _ = app.emit("term-exit", ());
+        if let Ok(mut guard) = SHELL.lock() {
+            if guard.as_ref().is_some_and(|link| link.token == token) {
+                *guard = None;
+            }
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]

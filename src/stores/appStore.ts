@@ -1,12 +1,12 @@
 import { create } from "zustand";
-import { archiveFile, baseName, canExtract, diskFolder, isPackedPath, isRemotePath, isStillImage, joinPath, remoteParts } from "../lib/format";
-import { iconSizeOf } from "../lib/iconSize";
+import { archiveFile, baseName, canExtract, diskFolder, isPackedPath, isRemotePath, isStillImage, joinPath, pathKey, remoteParts } from "../lib/format";
+import { ICON_COLUMNS_DEFAULT, iconColumnsOf } from "../lib/iconSize";
 import type { NameSource, NameTemplate } from "../lib/names";
 import { fileRows, treeRows } from "../lib/rows";
 import { alignScroll, holdScrollSync, setScrollLock } from "../lib/scrollLock";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
 import { readSession, writeSession } from "../lib/session";
-import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, McpTool, ModalState, Panel, PendingTransfer, Place, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
+import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, McpTool, ModalState, NavPin, Panel, PendingTransfer, Place, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
 import { toast } from "./toastStore";
 
 let deleting = false;
@@ -33,7 +33,7 @@ function emptyPanel(path = ""): Panel {
     historyAt: 0,
     viewHistory: [],
     localPath: isRemotePath(path) ? "" : path,
-    iconSize: 112,
+    iconSize: ICON_COLUMNS_DEFAULT,
   };
 }
 
@@ -122,6 +122,27 @@ function storedTints(value: unknown): Record<string, string> {
   return next;
 }
 
+function storedPins(value: unknown, places: Place[]): NavPin[] {
+  if (!Array.isArray(value)) {
+    const desktop = places.find((place) => place.role === "desktop");
+    return desktop ? [{ name: desktop.name, path: desktop.path }] : [];
+  }
+  const seen = new Set<string>();
+  const pins: NavPin[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { name?: unknown; path?: unknown };
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    if (!path || !name) continue;
+    const key = pathKey(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pins.push({ name, path });
+  }
+  return pins;
+}
+
 function storedTemplates(value: NameTemplate[] | undefined): NameTemplate[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
@@ -147,6 +168,9 @@ interface AppState {
   iconTints: Record<string, string>;
   places: Place[];
   recent: string[];
+  leftNav: boolean;
+  rightNav: boolean;
+  pins: NavPin[];
   clipboard: Clipboard | null;
   textpad: boolean;
   command: string;
@@ -171,6 +195,10 @@ interface AppState {
   boot: () => Promise<void>;
   persist: () => Promise<void>;
   loadPlaces: () => Promise<void>;
+  toggleNav: (side: Side) => void;
+  pinPath: (path: string, name: string) => void;
+  unpinPath: (path: string) => void;
+  movePin: (from: number, to: number) => void;
   setTheme: (theme: ThemeMode) => void;
   setActive: (side: Side) => void;
   cyclePanel: (dir: 1 | -1) => void;
@@ -212,6 +240,7 @@ interface AppState {
   confirmMkdir: (name: string) => Promise<void>;
   confirmMkfile: (name: string) => Promise<void>;
   confirmRename: (name: string) => Promise<void>;
+  renamePath: (path: string, name: string) => Promise<void>;
   confirmRenameMany: (pairs: { path: string; name: string }[]) => Promise<void>;
   confirmZip: (name: string) => Promise<void>;
   confirmConvert: (format: string, quality: number, background: "white" | "black", replace: boolean) => Promise<void>;
@@ -246,7 +275,13 @@ interface AppState {
   onCmd: (chunk: CmdChunk) => void;
   onTransfer: (progress: TransferProgress) => void;
   setPalette: (open: boolean) => void;
+  clearRecent: () => void;
+  forgetRecent: (path: string) => void;
   askSftp: (draft?: SftpDraft) => void;
+  askConnections: () => void;
+  editConnection: (id: string) => void;
+  askForgetSftp: (id: string) => void;
+  confirmForgetSftp: () => Promise<void>;
   submitSftp: (draft: SftpDraft, acceptFingerprint?: string, replacePin?: boolean) => Promise<void>;
   disconnectSftp: (side?: Side) => Promise<void>;
   askServers: () => void;
@@ -267,6 +302,9 @@ export const useApp = create<AppState>((set, get) => ({
   iconTints: {},
   places: [],
   recent: [],
+  leftNav: false,
+  rightNav: false,
+  pins: [],
   clipboard: null,
   textpad: false,
   command: "",
@@ -318,6 +356,9 @@ export const useApp = create<AppState>((set, get) => ({
       outputHeight: clamp(session.outputHeight, 72, 800),
       terminalHeight: clamp(session.terminalHeight, 120, 800),
       nameTemplates: storedTemplates(session.nameTemplates),
+      leftNav: session.leftNav === true,
+      rightNav: session.rightNav === true,
+      pins: storedPins(session.pins, places),
       places,
       textpad,
       panels: {
@@ -325,7 +366,7 @@ export const useApp = create<AppState>((set, get) => ({
           ...emptyPanel(),
           view: session.leftView,
           listView: listView(session.leftView),
-          iconSize: iconSizeOf(session.leftIconSize),
+          iconSize: iconColumnsOf(session.leftIconSize),
           history: storedHistory(session.leftHistory),
           historyAt: storedAt(storedHistory(session.leftHistory), session.leftHistoryAt),
           viewHistory: storedHistory(session.leftHistory).map(() => session.leftView),
@@ -334,7 +375,7 @@ export const useApp = create<AppState>((set, get) => ({
           ...emptyPanel(),
           view: session.rightView,
           listView: listView(session.rightView),
-          iconSize: iconSizeOf(session.rightIconSize),
+          iconSize: iconColumnsOf(session.rightIconSize),
           history: storedHistory(session.rightHistory),
           historyAt: storedAt(storedHistory(session.rightHistory), session.rightHistoryAt),
           viewHistory: storedHistory(session.rightHistory).map(() => session.rightView),
@@ -395,8 +436,38 @@ export const useApp = create<AppState>((set, get) => ({
       outputHeight: state.outputHeight,
       terminalHeight: state.terminalHeight,
       nameTemplates: state.nameTemplates,
+      leftNav: state.leftNav,
+      rightNav: state.rightNav,
+      pins: state.pins,
     });
   },
+
+  toggleNav: (side) => set((state) => (side === "left" ? { leftNav: !state.leftNav } : { rightNav: !state.rightNav })),
+
+  pinPath: (path, name) => {
+    const cleanPath = path.trim();
+    const cleanName = name.trim() || baseName(cleanPath);
+    if (!cleanPath || !cleanName) return;
+    const key = pathKey(cleanPath);
+    set((state) => {
+      if (state.pins.some((pin) => pathKey(pin.path) === key)) return state;
+      return { pins: [...state.pins, { name: cleanName, path: cleanPath }] };
+    });
+  },
+
+  unpinPath: (path) => {
+    const key = pathKey(path);
+    set((state) => ({ pins: state.pins.filter((pin) => pathKey(pin.path) !== key) }));
+  },
+
+  movePin: (from, to) => set((state) => {
+    if (from === to || from < 0 || to < 0 || from >= state.pins.length || to >= state.pins.length) return state;
+    const pins = [...state.pins];
+    const [item] = pins.splice(from, 1);
+    if (!item) return state;
+    pins.splice(to, 0, item);
+    return { pins };
+  }),
 
   loadPlaces: async () => {
     if (!inTauri()) return;
@@ -962,16 +1033,23 @@ export const useApp = create<AppState>((set, get) => ({
     const modal = get().modal;
     if (modal?.type !== "rename") return;
     try {
-      const path = await invoke<string>("rename_path", { path: modal.path, name });
+      await get().renamePath(modal.path, name);
       set({ modal: null });
-      toast("success", "Renamed.");
-      await get().refreshBoth();
-      for (const side of ["left", "right"] as const) {
-        const index = fileRows(get().panels[side], get().showHidden).findIndex((row) => row.path === path);
-        if (index >= 0) set((state) => ({ panels: patch(state.panels, side, { cursor: index, anchor: index }) }));
-      }
     } catch (error) {
       toast("error", message(error));
+    }
+  },
+
+  renamePath: async (path, name) => {
+    const renamed = await invoke<string>("rename_path", { path, name });
+    toast("success", "Renamed.");
+    await get().refreshBoth();
+    const hidden = get().showHidden;
+    for (const side of ["left", "right"] as const) {
+      const panel = get().panels[side];
+      const rows = panel.view === "tree" ? treeRows(panel, hidden) : fileRows(panel, hidden);
+      const index = rows.findIndex((row) => row.path === renamed);
+      if (index >= 0) set((state) => ({ panels: patch(state.panels, side, { cursor: index, anchor: index }) }));
     }
   },
 
@@ -1133,7 +1211,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   setIconSize: (side, size) => {
     holdScrollSync();
-    set((state) => ({ panels: patch(state.panels, side, { iconSize: iconSizeOf(size) }) }));
+    set((state) => ({ panels: patch(state.panels, side, { iconSize: iconColumnsOf(size) }) }));
   },
   toggleHidden: () => set((state) => ({ showHidden: !state.showHidden })),
   toggleIconColors: () => set((state) => ({ iconColors: !state.iconColors })),
@@ -1181,11 +1259,7 @@ export const useApp = create<AppState>((set, get) => ({
     const command = get().command.trim();
     if (!command || get().running) return;
     const here = get().panels[get().active].path;
-    if (isRemotePath(here)) {
-      toast("warning", "Commands run on this computer. Open a local folder.");
-      return;
-    }
-    const cwd = diskFolder(here);
+    const cwd = isRemotePath(here) ? here : diskFolder(here);
     if (!cwd) {
       toast("warning", "Open a folder first.");
       return;
@@ -1225,7 +1299,61 @@ export const useApp = create<AppState>((set, get) => ({
   onTransfer: (transfer) => set({ transfer }),
   setPalette: (paletteOpen) => set({ paletteOpen }),
 
+  clearRecent: () => set({ recent: [] }),
+  forgetRecent: (path) => set((state) => ({ recent: state.recent.filter((item) => pathKey(item) !== pathKey(path)) })),
+
   askSftp: (draft) => set({ contextMenu: null, paletteOpen: false, modal: { type: "sftp", draft } }),
+
+  askConnections: () => set({ contextMenu: null, paletteOpen: false, modal: { type: "connections" } }),
+
+  editConnection: (id) => {
+    const profile = get().sftpProfiles.find((item) => item.id === id);
+    if (!profile) return;
+    set({
+      contextMenu: null,
+      paletteOpen: false,
+      modal: {
+        type: "sftp",
+        draft: {
+          profileId: profile.id,
+          label: profile.label,
+          host: profile.host,
+          port: String(profile.port),
+          username: profile.username,
+          password: "",
+          privateKey: "",
+          passphrase: "",
+          remotePath: profile.remotePath,
+        },
+      },
+    });
+  },
+
+  askForgetSftp: (id) => {
+    const profile = get().sftpProfiles.find((item) => item.id === id);
+    if (!profile) return;
+    set({ contextMenu: null, modal: { type: "forgetSftp", id: profile.id, label: profile.label } });
+  },
+
+  confirmForgetSftp: async () => {
+    const modal = get().modal;
+    if (modal?.type !== "forgetSftp") return;
+    try {
+      await invoke("sftp_forget", { id: modal.id });
+      for (const side of ["left", "right"] as Side[]) {
+        const remote = remoteParts(get().panels[side].path);
+        if (remote?.id !== modal.id) continue;
+        const local = get().panels[side].localPath;
+        const next = local || await invoke<string>("home_dir");
+        await get().navigate(side, next);
+      }
+      await get().loadPlaces();
+      set({ modal: { type: "connections" } });
+      toast("success", "Removed that connection.");
+    } catch (error) {
+      toast("error", message(error));
+    }
+  },
 
   askServers: () => set({ contextMenu: null, paletteOpen: false, modal: { type: "servers" } }),
 

@@ -60,7 +60,12 @@ pub fn list_places() -> Vec<Place> {
     let mut places = Vec::new();
     let home = PathBuf::from(home_dir());
     places.push(Place { name: "Home".into(), path: friendly(&home), kind: "place".into(), role: "home".into() });
-    for (name, folder, role) in [("Desktop", "Desktop", "desktop"), ("Documents", "Documents", "documents"), ("Downloads", "Downloads", "downloads")] {
+    for (name, folder, role) in [
+        ("Desktop", "Desktop", "desktop"),
+        ("Documents", "Documents", "documents"),
+        ("Downloads", "Downloads", "downloads"),
+        ("Pictures", "Pictures", "pictures"),
+    ] {
         let path = home.join(folder);
         if path.is_dir() {
             places.push(Place { name: name.into(), path: friendly(&path), kind: "place".into(), role: role.into() });

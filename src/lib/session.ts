@@ -1,4 +1,5 @@
-import type { ThemeMode, ViewMode } from "../types";
+import type { NavPin, ThemeMode, ViewMode } from "../types";
+import { ICON_COLUMNS_DEFAULT } from "./iconSize";
 import type { NameTemplate } from "./names";
 import { inTauri } from "./platform";
 
@@ -26,6 +27,9 @@ export interface SessionData {
   outputHeight: number;
   terminalHeight: number;
   nameTemplates: NameTemplate[];
+  leftNav: boolean;
+  rightNav: boolean;
+  pins?: NavPin[];
 }
 
 const FALLBACK = "filepad-session";
@@ -39,9 +43,9 @@ export function defaultSession(): SessionData {
     rightView: "details",
     showHidden: false,
     iconColors: true,
-    iconSize: 112,
-    leftIconSize: 112,
-    rightIconSize: 112,
+    iconSize: ICON_COLUMNS_DEFAULT,
+    leftIconSize: ICON_COLUMNS_DEFAULT,
+    rightIconSize: ICON_COLUMNS_DEFAULT,
     keyBar: true,
     scrollLock: false,
     iconTints: {},
@@ -55,6 +59,8 @@ export function defaultSession(): SessionData {
     outputHeight: 160,
     terminalHeight: 240,
     nameTemplates: [],
+    leftNav: false,
+    rightNav: false,
   };
 }
 

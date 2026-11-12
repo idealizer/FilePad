@@ -4,10 +4,12 @@ export function Dropdown({
   button,
   children,
   align = "start",
+  menuClass = "",
 }: {
   button: (props: { open: boolean; toggle: () => void }) => ReactNode;
   children: (close: () => void) => ReactNode;
   align?: "start" | "end";
+  menuClass?: string;
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -49,7 +51,7 @@ export function Dropdown({
   return (
     <div ref={root} className="relative inline-flex">
       {button({ open, toggle: () => setOpen((value) => !value) })}
-      {open && <div ref={menu} className="menu" style={align === "end" ? { right: 0, left: "auto" } : { left: 0, right: "auto" }}>{children(() => setOpen(false))}</div>}
+      {open && <div ref={menu} className={menuClass ? `menu ${menuClass}` : "menu"} style={align === "end" ? { right: 0, left: "auto" } : { left: 0, right: "auto" }}>{children(() => setOpen(false))}</div>}
     </div>
   );
 }

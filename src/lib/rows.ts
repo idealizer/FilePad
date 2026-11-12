@@ -36,6 +36,13 @@ export function fileRows(panel: Panel, showHidden: boolean): Row[] {
   return rows;
 }
 
+export function previewTarget(panel: Panel, showHidden: boolean): Row | TreeRow | null {
+  if (panel.view === "tree") return treeRows(panel, showHidden)[panel.cursor] ?? null;
+  const row = fileRows(panel, showHidden)[panel.cursor];
+  if (!row || row.up) return null;
+  return row;
+}
+
 export function treeRows(panel: Panel, showHidden: boolean): TreeRow[] {
   const rows: TreeRow[] = [];
   const query = panel.filter.trim().toLowerCase();

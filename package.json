@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "fetch-ffmpeg": "node src-tauri/resources/fetch-ffmpeg.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -7,6 +7,22 @@ import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Ro
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
+import { FileName } from "./FileName";
+
+export function SortHead({ side }: { side: Side }) {
+  const sortKey = useApp((state) => state.panels[side].sortKey);
+  const sortAsc = useApp((state) => state.panels[side].sortAsc);
+  const setSort = useApp((state) => state.setSort);
+  const mark = (key: typeof sortKey) => (sortKey === key ? (sortAsc ? " ↑" : " ↓") : "");
+  return (
+    <div className="fp-head fp-details px-2">
+      <button data-active={sortKey === "name"} onClick={() => setSort(side, "name")}>Name{mark("name")}</button>
+      <button data-active={sortKey === "size"} onClick={() => setSort(side, "size")}>Size{mark("size")}</button>
+      <button data-active={sortKey === "modified"} onClick={() => setSort(side, "modified")}>Modified{mark("modified")}</button>
+      <button data-active={sortKey === "type"} onClick={() => setSort(side, "type")}>Type{mark("type")}</button>
+    </div>
+  );
+}
 
 export function FileList({ side }: { side: Side }) {
   const panel = useApp((state) => state.panels[side]);
@@ -16,7 +32,6 @@ export function FileList({ side }: { side: Side }) {
   const toggleMark = useApp((state) => state.toggleMark);
   const markRange = useApp((state) => state.markRange);
   const openCurrent = useApp((state) => state.openCurrent);
-  const setSort = useApp((state) => state.setSort);
   const focusForMenu = useApp((state) => state.focusForMenu);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
@@ -45,12 +60,7 @@ export function FileList({ side }: { side: Side }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="fp-head fp-details px-2">
-        <button data-active={panel.sortKey === "name"} onClick={() => setSort(side, "name")}>Name{panel.sortKey === "name" ? (panel.sortAsc ? " ↑" : " ↓") : ""}</button>
-        <button data-active={panel.sortKey === "size"} onClick={() => setSort(side, "size")}>Size</button>
-        <button data-active={panel.sortKey === "modified"} onClick={() => setSort(side, "modified")}>Modified</button>
-        <button data-active={panel.sortKey === "type"} onClick={() => setSort(side, "type")}>Type</button>
-      </div>
+      <SortHead side={side} />
       <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
         {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
@@ -113,7 +123,7 @@ export function FileList({ side }: { side: Side }) {
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <FileIcon isDir={row.isDir} extension={row.extension} up={row.up} />
-                  <span className="truncate">{row.name}</span>
+                  {row.up ? <span className="truncate">{row.name}</span> : <FileName className="min-w-0 flex-1 truncate" name={row.name} path={row.path} isDir={row.isDir} selected={item.index === panel.cursor} activate="slow" />}
                 </span>
                 {panel.view === "details" && (
                   <>

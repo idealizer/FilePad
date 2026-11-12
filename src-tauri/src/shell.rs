@@ -127,7 +127,40 @@ pub fn terminal_open(app: AppHandle, state: &ShellState, cwd: String, cols: u16,
     Ok(())
 }
 
+pub fn terminal_use(app: AppHandle, state: &ShellState, path: &str, cols: u16, rows: u16) -> Result<(), String> {
+    if let Some((id, remote)) = crate::sftpnav::split(path) {
+        close_local(state);
+        return crate::sftpnav::shell_open(app, &id, &remote, cols, rows);
+    }
+    crate::sftpnav::shell_close();
+    let fresh = state.pty_child.lock().map_err(|err| err.to_string())?.is_none();
+    if fresh {
+        terminal_open(app, state, path.to_string(), cols, rows)?;
+    } else if !path.trim().is_empty() {
+        terminal_cd(state, path)?;
+    }
+    Ok(())
+}
+
+fn close_local(state: &ShellState) {
+    if let Ok(mut child) = state.pty_child.lock() {
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
+        }
+        *child = None;
+    }
+    if let Ok(mut writer) = state.pty_writer.lock() {
+        *writer = None;
+    }
+    if let Ok(mut master) = state.pty_master.lock() {
+        *master = None;
+    }
+}
+
 pub fn terminal_write(state: &ShellState, data: &[u8]) -> Result<(), String> {
+    if crate::sftpnav::shell_write(data)? {
+        return Ok(());
+    }
     let mut guard = state.pty_writer.lock().map_err(|err| err.to_string())?;
     let Some(writer) = guard.as_mut() else { return Err("The terminal isn't open.".into()) };
     writer.write_all(data).map_err(|err| err.to_string())?;
@@ -136,6 +169,9 @@ pub fn terminal_write(state: &ShellState, data: &[u8]) -> Result<(), String> {
 }
 
 pub fn terminal_resize(state: &ShellState, cols: u16, rows: u16) -> Result<(), String> {
+    if crate::sftpnav::shell_resize(cols, rows)? {
+        return Ok(());
+    }
     let guard = state.pty_master.lock().map_err(|err| err.to_string())?;
     if let Some(master) = guard.as_ref() {
         master

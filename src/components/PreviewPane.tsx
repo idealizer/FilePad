@@ -1381,13 +1381,10 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
             </label>
           )}
           {(format === "jpg" || format === "bmp") && ["png", "webp", "avif", "gif", "svg", "ico"].includes(preview.extension) && (
-            <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
-              Transparent parts
-              <span className="seg" role="group" aria-label="Color for transparent parts">
-                <button type="button" data-active={background === "white"} data-tip="See-through parts become white" onClick={() => setBackground("white")}>White</button>
-                <button type="button" data-active={background === "black"} data-tip="See-through parts become black" onClick={() => setBackground("black")}>Black</button>
-              </span>
-            </label>
+            <span className="seg" role="group" aria-label="Color for transparent parts">
+              <button type="button" data-active={background === "white"} data-tip="See-through parts become white" aria-label="White" onClick={() => setBackground("white")}><span className="fp-ink" style={{ background: "#fff" }} /></button>
+              <button type="button" data-active={background === "black"} data-tip="See-through parts become black" aria-label="Black" onClick={() => setBackground("black")}><span className="fp-ink" style={{ background: "#000" }} /></button>
+            </span>
           )}
           <button
             className="btn sm primary"

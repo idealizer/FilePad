@@ -55,7 +55,7 @@ pub fn mcp_stdio() {
             "initialize" => Ok(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "FilePad", "version": "0.1.0" }
+                "serverInfo": { "name": "FilePad", "version": "2.0.0" }
             })),
             "tools/list" => Ok(json!({ "tools": tool_list() })),
             "ping" => Ok(json!({})),

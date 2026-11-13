@@ -475,8 +475,8 @@ function ConvertDialog() {
   if (modal?.type !== "convert") return null;
   const pictures = modal.paths.filter(isStillImage);
   const gif = pictures.some((path) => path.toLowerCase().endsWith(".gif"));
-  const lossy = format === "jpg" || format === "bmp";
   const qualityOn = format === "jpg" || format === "avif";
+  const fillOn = (format === "jpg" || format === "bmp") && pictures.some((path) => /\.(png|webp|avif|gif|svg|ico)$/i.test(path));
   return (
     <form
       onSubmit={(event) => {
@@ -498,14 +498,11 @@ function ConvertDialog() {
           <span className="w-8 text-right text-[var(--text)]">{quality}</span>
         </label>
       )}
-      {lossy && (
-        <div className="mt-3 flex items-center gap-2 text-sm">
-          <span className="text-[var(--muted)]">Background</span>
-          <span className="seg">
-            <button type="button" data-active={background === "white"} onClick={() => setBackground("white")}>White</button>
-            <button type="button" data-active={background === "black"} onClick={() => setBackground("black")}>Black</button>
-          </span>
-        </div>
+      {fillOn && (
+        <span className="seg mt-3" role="group" aria-label="Color for transparent parts">
+          <button type="button" data-active={background === "white"} data-tip="See-through parts become white" aria-label="White" onClick={() => setBackground("white")}><span className="fp-ink" style={{ background: "#fff" }} /></button>
+          <button type="button" data-active={background === "black"} data-tip="See-through parts become black" aria-label="Black" onClick={() => setBackground("black")}><span className="fp-ink" style={{ background: "#000" }} /></button>
+        </span>
       )}
       {gif && <p className="mt-3 text-sm text-[var(--muted)]">Animated GIFs become a single frame.</p>}
       {(format === "png" || format === "webp") && <p className="mt-3 text-sm text-[var(--muted)]">This keeps every pixel. Photos are often larger than a JPG.</p>}

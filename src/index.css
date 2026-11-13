@@ -184,6 +184,7 @@
   border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12.5px;
 }
 .seg > button svg { width: 15px; height: 15px; }
+.fp-ink { width: 14px; height: 14px; border-radius: 3px; border: 1px solid color-mix(in srgb, var(--text) 35%, transparent); }
 .seg > button:hover:not(:disabled) { color: var(--text); }
 .seg > button[data-active="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 0.18); }
 

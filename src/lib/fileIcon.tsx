@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import { File, FileArchive, FileAudio, FileCode, FileImage, FileSpreadsheet, FileText, FileVideo, Folder, FolderUp } from "lucide-react";
 import { useApp } from "../stores/appStore";
 
-const images = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tif", "tiff", "heic", "heif"];
+const images = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico", "tif", "tiff", "heic", "heif"];
 const sheets = ["xls", "xlsx", "csv", "tsv"];
 const text = ["txt", "md", "markdown", "log", "rtf"];
 const archives = ["zip", "gz", "gzip", "tgz", "7z", "rar"];

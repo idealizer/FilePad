@@ -504,7 +504,7 @@ fn record_at(buf: &[u8], offset: usize) -> Option<Rec<'_>> {
     })
 }
 
-fn ole_stream(bytes: &[u8], wanted: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn ole_stream(bytes: &[u8], wanted: &str) -> Result<Vec<u8>, String> {
     if bytes.len() < 512 || bytes[..8] != OLE_MAGIC {
         return Err("Can't read that presentation.".into());
     }

@@ -13,6 +13,8 @@
     "windows": [
       {
         "title": "FilePad",
+        "decorations": false,
+        "shadow": true,
         "width": 1280,
         "height": 840,
         "minWidth": 860,

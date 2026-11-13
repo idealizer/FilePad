@@ -14,6 +14,17 @@ export function parentPath(path: string): string {
   return index >= 0 ? trimmed.slice(0, index) : trimmed;
 }
 
+export function relativePlace(root: string, path: string): string {
+  const parent = parentPath(path);
+  const base = root.replace(/[\\/]+$/, "");
+  if (!base || parent.toLowerCase() === base.toLowerCase()) return "";
+  const mark = parent[base.length];
+  if (parent.toLowerCase().startsWith(base.toLowerCase()) && (mark === "\\" || mark === "/")) {
+    return parent.slice(base.length).replace(/^[\\/]+/, "");
+  }
+  return parent;
+}
+
 export function joinPath(folder: string, name: string): string {
   const sep = folder.includes("\\") ? "\\" : "/";
   return `${folder.replace(/[\\/]+$/, "")}${sep}${name}`;
@@ -135,12 +146,78 @@ export function canExtract(path: string): boolean {
   return !/\.(?:zip|tar\.gz|tgz|gzip|gz)$/i.test(inner);
 }
 
-const stillImages = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+const stillImages = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"]);
 
 export function isStillImage(path: string): boolean {
   const name = baseName(path);
   const dot = name.lastIndexOf(".");
   return dot >= 0 && stillImages.has(name.slice(dot + 1).toLowerCase());
+}
+
+export interface PathCrumb {
+  name: string;
+  path: string;
+}
+
+export function pathCrumbs(path: string, places: { name: string; path: string }[] = [], connections: { id: string; label: string }[] = []): PathCrumb[] {
+  const remote = remoteParts(path);
+  if (remote) {
+    const name = connections.find((item) => item.id === remote.id)?.label.trim() || "Server";
+    const crumbs: PathCrumb[] = [{ name, path: `sftp:${remote.id}:/` }];
+    let acc = "";
+    for (const part of remote.remote.split("/").filter(Boolean)) {
+      acc += `/${part}`;
+      crumbs.push({ name: part, path: `sftp:${remote.id}:${acc}` });
+    }
+    return crumbs;
+  }
+  const packed = packedBody(path);
+  if (packed) {
+    const crumbs = localCrumbs(packed.archive, places);
+    if (crumbs.length) crumbs[crumbs.length - 1] = { ...crumbs[crumbs.length - 1], path: `${packed.prefix}:${packed.archive}|` };
+    let inner = "";
+    for (const part of packed.inner.split("/").filter(Boolean)) {
+      inner = inner ? `${inner}/${part}` : part;
+      crumbs.push({ name: part, path: `${packed.prefix}:${packed.archive}|${inner}` });
+    }
+    return crumbs;
+  }
+  return localCrumbs(path, places);
+}
+
+function localCrumbs(path: string, places: { name: string; path: string }[]): PathCrumb[] {
+  const trimmed = path.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("\\\\") || trimmed.startsWith("//")) {
+    const bits = trimmed.split(/[/\\]/).filter(Boolean);
+    const crumbs: PathCrumb[] = [];
+    let acc = "";
+    bits.forEach((bit, index) => {
+      acc = index === 0 ? `\\\\${bit}` : `${acc}\\${bit}`;
+      crumbs.push({ name: index === 0 ? acc : bit, path: acc });
+    });
+    return crumbs;
+  }
+  const bits = trimmed.split(/[/\\]/).filter(Boolean);
+  if (!bits.length) return trimmed === "/" ? [{ name: "/", path: "/" }] : [];
+  const sep = trimmed.includes("\\") ? "\\" : "/";
+  const crumbs: PathCrumb[] = [];
+  let acc = "";
+  bits.forEach((bit, index) => {
+    if (index === 0 && /^[A-Za-z]:$/.test(bit)) {
+      acc = `${bit}\\`;
+      const place = places.find((item) => samePath(item.path, acc));
+      crumbs.push({ name: place?.name || bit, path: acc });
+      return;
+    }
+    acc = index === 0 && sep === "/" ? `/${bit}` : `${acc.replace(/[\\/]+$/, "")}${sep}${bit}`;
+    crumbs.push({ name: bit, path: acc });
+  });
+  return crumbs;
+}
+
+function samePath(left: string, right: string): boolean {
+  return left.replace(/[\\/]+$/, "").toLowerCase() === right.replace(/[\\/]+$/, "").toLowerCase();
 }
 
 export function diskFolder(path: string): string {

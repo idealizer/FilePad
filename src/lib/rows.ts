@@ -1,5 +1,34 @@
-import { typeLabel } from "./format";
+import { pathKey, relativePlace, typeLabel } from "./format";
 import type { Entry, Panel } from "../types";
+
+const markSets = new WeakMap<string[], Set<string>>();
+
+export function markSet(paths: string[]): Set<string> {
+  const found = markSets.get(paths);
+  if (found) return found;
+  const set = new Set(paths);
+  markSets.set(paths, set);
+  return set;
+}
+
+const rowCache: { panel: Panel; hidden: boolean; rows: Row[] }[] = [];
+const treeCache: { panel: Panel; hidden: boolean; rows: TreeRow[] }[] = [];
+
+function cachedRows(panel: Panel, showHidden: boolean): Row[] | null {
+  for (let index = rowCache.length - 1; index >= 0; index -= 1) {
+    const hit = rowCache[index];
+    if (hit.panel === panel && hit.hidden === showHidden) return hit.rows;
+  }
+  return null;
+}
+
+function cachedTree(panel: Panel, showHidden: boolean): TreeRow[] | null {
+  for (let index = treeCache.length - 1; index >= 0; index -= 1) {
+    const hit = treeCache[index];
+    if (hit.panel === panel && hit.hidden === showHidden) return hit.rows;
+  }
+  return null;
+}
 
 export interface Row {
   key: string;
@@ -10,6 +39,7 @@ export interface Row {
   modified: number;
   extension: string;
   up: boolean;
+  place: string;
 }
 
 export interface TreeRow {
@@ -22,16 +52,47 @@ export interface TreeRow {
   size: number;
   modified: number;
   extension: string;
+  place: string;
+}
+
+export function hasLocalMatch(panel: Panel, showHidden: boolean): boolean {
+  const query = panel.filter.trim().toLowerCase();
+  return panel.entries.some((entry) => (showHidden || !entry.hidden) && (!query || entry.name.toLowerCase().includes(query)));
+}
+
+export function folderNote(panel: Panel, shown: number, showHidden: boolean): string | null {
+  if (panel.error || shown > 0) return null;
+  if (panel.loading) return "Reading…";
+  const query = panel.filter.trim();
+  if (!query) return "This folder is empty.";
+  if (hasLocalMatch(panel, showHidden)) return null;
+  if (panel.searching || panel.searched.trim().toLowerCase() !== query.toLowerCase()) return "Searching…";
+  if (panel.searchLimited) return "Nothing in the first part of this folder.";
+  return "No matches.";
 }
 
 export function fileRows(panel: Panel, showHidden: boolean): Row[] {
-  let entries = panel.entries.filter((entry) => showHidden || !entry.hidden);
+  const hit = cachedRows(panel, showHidden);
+  if (hit) return hit;
+  const rows = buildFileRows(panel, showHidden);
+  rowCache.push({ panel, hidden: showHidden, rows });
+  if (rowCache.length > 8) rowCache.shift();
+  return rows;
+}
+
+function buildFileRows(panel: Panel, showHidden: boolean): Row[] {
   const query = panel.filter.trim().toLowerCase();
-  if (query) entries = entries.filter((entry) => entry.name.toLowerCase().includes(query));
-  entries.sort((left, right) => compareEntries(left, right, panel.sortKey, panel.sortAsc));
-  const rows = entries.map(toRow);
+  const entries = matching(panel.entries, showHidden, query).sort((left, right) => compareEntries(left, right, panel.sortKey, panel.sortAsc));
+  const rows = entries.map((entry) => toRow(entry, ""));
+  if (query && panel.searched.trim().toLowerCase() === query) {
+    const seen = new Set(rows.map((row) => pathKey(row.path)));
+    const extra = matching(panel.hits, showHidden, query)
+      .filter((entry) => !seen.has(pathKey(entry.path)))
+      .sort((left, right) => compareEntries(left, right, panel.sortKey, panel.sortAsc));
+    for (const entry of extra) rows.push(toRow(entry, relativePlace(panel.path, entry.path)));
+  }
   if (panel.parent && !query) {
-    rows.unshift({ key: `up:${panel.path}`, name: "..", path: panel.parent, isDir: true, size: 0, modified: 0, extension: "", up: true });
+    rows.unshift({ key: `up:${panel.path}`, name: "..", path: panel.parent, isDir: true, size: 0, modified: 0, extension: "", up: true, place: "" });
   }
   return rows;
 }
@@ -44,6 +105,15 @@ export function previewTarget(panel: Panel, showHidden: boolean): Row | TreeRow 
 }
 
 export function treeRows(panel: Panel, showHidden: boolean): TreeRow[] {
+  const hit = cachedTree(panel, showHidden);
+  if (hit) return hit;
+  const rows = buildTreeRows(panel, showHidden);
+  treeCache.push({ panel, hidden: showHidden, rows });
+  if (treeCache.length > 8) treeCache.shift();
+  return rows;
+}
+
+function buildTreeRows(panel: Panel, showHidden: boolean): TreeRow[] {
   const rows: TreeRow[] = [];
   const query = panel.filter.trim().toLowerCase();
   const walk = (path: string, depth: number) => {
@@ -63,13 +133,38 @@ export function treeRows(panel: Panel, showHidden: boolean): TreeRow[] {
           size: kid.size,
           modified: kid.modified,
           extension: kid.extension,
+          place: "",
         });
       }
       if (open) walk(kid.path, depth + 1);
     }
   };
   walk(panel.path, 0);
+  if (query && panel.searched.trim().toLowerCase() === query) {
+    const seen = new Set(rows.map((row) => pathKey(row.path)));
+    const extra = matching(panel.hits, showHidden, query)
+      .filter((entry) => !seen.has(pathKey(entry.path)))
+      .sort((left, right) => compareEntries(left, right, panel.sortKey, panel.sortAsc));
+    for (const entry of extra) {
+      rows.push({
+        key: entry.path,
+        name: entry.name,
+        path: entry.path,
+        depth: 0,
+        expanded: false,
+        isDir: entry.isDir,
+        size: entry.size,
+        modified: entry.modified,
+        extension: entry.extension,
+        place: relativePlace(panel.path, entry.path),
+      });
+    }
+  }
   return rows;
+}
+
+function matching(entries: Entry[], showHidden: boolean, query: string): Entry[] {
+  return entries.filter((entry) => (showHidden || !entry.hidden) && (!query || entry.name.toLowerCase().includes(query)));
 }
 
 export function otherNames(entries: Entry[], showHidden: boolean, filter: string): Set<string> {
@@ -89,8 +184,8 @@ export function pairMark(names: Set<string> | null, row: { up: boolean; name: st
   return names.has(row.name.toLowerCase()) ? "same" : "only";
 }
 
-function toRow(entry: Entry): Row {
-  return { key: entry.path, name: entry.name, path: entry.path, isDir: entry.isDir, size: entry.size, modified: entry.modified, extension: entry.extension, up: false };
+function toRow(entry: Entry, place: string): Row {
+  return { key: entry.path, name: entry.name, path: entry.path, isDir: entry.isDir, size: entry.size, modified: entry.modified, extension: entry.extension, up: false, place };
 }
 
 let lastUpClick = { key: "", at: 0 };

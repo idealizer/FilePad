@@ -1,18 +1,31 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { armDrag, useDragSession } from "../lib/drag";
+import { armDrag, takeDragMenu, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
+import { parentPath } from "../lib/format";
 import { iconColumnsOf } from "../lib/iconSize";
-import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
+import { fileRows, folderNote, markSet, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
-import { invoke } from "../lib/platform";
+import { invoke, message } from "../lib/platform";
 import { useApp } from "../stores/appStore";
 import { FileName } from "./FileName";
 import { SortHead } from "./FileList";
 import type { Side } from "../types";
 
-const pictures = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
+const pictures = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "mp4", "m4v", "webm", "mov", "mkv", "ogv"]);
 const thumbs = new Map<string, string>();
+const THUMB_CACHE = 2000;
+let thumbSeq = 0;
+
+function rememberThumb(key: string, url: string) {
+  if (thumbs.has(key)) thumbs.delete(key);
+  thumbs.set(key, url);
+  while (thumbs.size > THUMB_CACHE) {
+    const oldest = thumbs.keys().next().value;
+    if (oldest === undefined) break;
+    thumbs.delete(oldest);
+  }
+}
 
 export function setIconColumns(side: Side, count: number) {
   columns[side] = Math.max(1, count);
@@ -41,6 +54,7 @@ export function IconView({ side }: { side: Side }) {
   const otherFilter = useApp((state) => state.panels[side === "left" ? "right" : "left"].filter);
   const pairs = useMemo(() => (scrollLock ? otherNames(otherEntries, showHidden, otherFilter) : null), [scrollLock, otherEntries, showHidden, otherFilter]);
   const rows = fileRows(panel, showHidden);
+  const marks = markSet(panel.marked);
   const parent = useRef<HTMLDivElement>(null);
   useLinkedScroll(side, parent);
   const [width, setWidth] = useState(0);
@@ -54,8 +68,9 @@ export function IconView({ side }: { side: Side }) {
     return () => observer.disconnect();
   }, [side]);
   const across = columns;
+  const nested = rows.some((row) => row.place);
   const cell = width > 0 ? Math.max(1, (width - 12) / across) : 112;
-  const metrics = { cell, glyph: Math.round(cell * 0.64), row: Math.round(cell * 0.64) + 52 };
+  const metrics = { cell, glyph: Math.round(cell * 0.64), row: Math.round(cell * 0.64) + (nested ? 68 : 52) };
   useEffect(() => {
     setIconColumns(side, across);
   }, [side, across]);
@@ -102,14 +117,13 @@ export function IconView({ side }: { side: Side }) {
         style={{ "--fp-icon": `${metrics.cell}px`, "--fp-glyph": `${metrics.glyph}px` } as CSSProperties}
       >
       {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
-      {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
-      {!panel.error && !panel.loading && rows.length === 0 && <div className="px-3 py-6 text-center text-[var(--muted)]">This folder is empty.</div>}
+      {folderNote(panel, rows.length, showHidden) && <div className="px-3 py-6 text-center text-[var(--muted)]">{folderNote(panel, rows.length, showHidden)}</div>}
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((line) => (
           <div key={line.key} className="fp-icon-row" style={{ position: "absolute", top: 0, left: 0, width: "100%", height: metrics.row, transform: `translateY(${line.start}px)` }}>
             {rows.slice(line.index * across, line.index * across + across).map((row, offset) => {
               const index = line.index * across + offset;
-              const marked = panel.marked.includes(row.path);
+              const marked = marks.has(row.path);
               return (
                 <div
                   key={row.key}
@@ -118,8 +132,8 @@ export function IconView({ side }: { side: Side }) {
                   data-marked={marked}
                   data-pair={pairMark(pairs, row)}
                   data-drop={Boolean(drag && row.isDir && drag.over === row.path)}
-                  data-drop-path={row.up ? panel.parent ?? panel.path : row.isDir ? row.path : panel.path}
-                  title={row.name}
+                  data-drop-path={row.up ? panel.parent ?? panel.path : row.isDir ? row.path : row.place ? parentPath(row.path) : panel.path}
+                  title={row.place ? `${row.name} — ${row.place}` : row.name}
                   onDragStart={(event) => event.preventDefault()}
                   onMouseDown={(event) => {
                     setActive(side);
@@ -133,7 +147,7 @@ export function IconView({ side }: { side: Side }) {
                     else clickEntry(side, index);
                   }}
                   onPointerDown={(event) => {
-                    if (event.button !== 0 || row.up) return;
+                    if ((event.button !== 0 && event.button !== 2) || row.up) return;
                     const path = row.path;
                     armDrag(event, () => {
                       const markedPaths = useApp.getState().panels[side].marked;
@@ -148,6 +162,7 @@ export function IconView({ side }: { side: Side }) {
                     void openCurrent();
                   }}
                   onContextMenu={(event) => {
+                    if (takeDragMenu(event)) return;
                     event.preventDefault();
                     event.stopPropagation();
                     if (row.up) {
@@ -155,13 +170,14 @@ export function IconView({ side }: { side: Side }) {
                       openContext({ x: event.clientX, y: event.clientY, side, paths: [] });
                       return;
                     }
-                    const keep = panel.marked.includes(row.path);
+                    const keep = marks.has(row.path);
                     focusForMenu(side, index, row.path);
                     openContext({ x: event.clientX, y: event.clientY, side, paths: keep ? panel.marked : [row.path] });
                   }}
                 >
                   <span className="fp-glyph">{pictures.has(row.extension) && !row.isDir ? <Picture path={row.path} row={row} /> : <FileIcon isDir={row.isDir} extension={row.extension} up={row.up} />}</span>
                   {row.up ? <span className="fp-name">{row.name}</span> : <FileName className="fp-name" name={row.name} path={row.path} isDir={row.isDir} selected={index === panel.cursor} activate="slow" />}
+                  {row.place && <span className="fp-place">{row.place}</span>}
                 </div>
               );
             })}
@@ -174,28 +190,34 @@ export function IconView({ side }: { side: Side }) {
 }
 
 function Picture({ path, row }: { path: string; row: Row }) {
-  const cached = thumbs.get(path) ?? "";
+  const key = `${path}\0${row.modified}`;
+  const cached = thumbs.get(key) ?? "";
   const [src, setSrc] = useState(cached);
   useEffect(() => {
-    if (thumbs.has(path)) {
-      setSrc(thumbs.get(path) ?? "");
+    if (thumbs.has(key)) {
+      setSrc(thumbs.get(key) ?? "");
       return;
     }
+    const id = ++thumbSeq;
     let cancel = false;
-    void invoke<{ mime: string; dataBase64: string }>("file_thumb", { path })
+    let settled = false;
+    void invoke<{ mime: string; dataBase64: string }>("file_thumb", { path, id })
       .then((thumb) => {
+        settled = true;
         const url = `data:${thumb.mime};base64,${thumb.dataBase64}`;
-        if (thumbs.size > 300) thumbs.delete(thumbs.keys().next().value ?? "");
-        thumbs.set(path, url);
+        rememberThumb(key, url);
         if (!cancel) setSrc(url);
       })
-      .catch(() => {
-        thumbs.set(path, "");
+      .catch((reason: unknown) => {
+        settled = true;
+        if (cancel || message(reason) === "cancelled") return;
+        rememberThumb(key, "");
       });
     return () => {
       cancel = true;
+      if (!settled) void invoke("cancel_thumb", { id });
     };
-  }, [path]);
+  }, [path, key]);
   if (!src) return <FileIcon isDir={row.isDir} extension={row.extension} />;
   return <img src={src} alt="" draggable={false} />;
 }

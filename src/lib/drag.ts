@@ -1,14 +1,16 @@
 import { useSyncExternalStore } from "react";
-import { isPackedPath, isRemotePath, parentPath, remoteParts } from "./format";
+import { parentPath } from "./format";
 import { invoke, message } from "./platform";
 import { useApp } from "../stores/appStore";
 import { toast } from "../stores/toastStore";
+import type { Side } from "../types";
 
 export interface DragSession {
   paths: string[];
   x: number;
   y: number;
   move: boolean;
+  choose: boolean;
   hint: string;
   over: string | null;
   side: string | null;
@@ -42,32 +44,53 @@ function clearSession() {
   publish();
 }
 
-function volumeOf(path: string): string | null {
-  if (isPackedPath(path)) return null;
-  if (isRemotePath(path)) {
-    const remote = remoteParts(path);
-    return remote ? `sftp:${remote.id}` : null;
-  }
-  if (path.startsWith("\\\\") || path.startsWith("//")) {
-    const parts = path.split(/[\\/]/).filter(Boolean);
-    if (parts.length < 2) return null;
-    return `unc:${parts[0].toLowerCase()}\\${parts[1].toLowerCase()}`;
-  }
-  const drive = /^([a-zA-Z]:)/.exec(path);
-  return drive ? drive[1].toLowerCase() : null;
+let suppressMenu = false;
+
+export function takeDragMenu(event: { preventDefault(): void; stopPropagation(): void }): boolean {
+  if (!suppressMenu) return false;
+  suppressMenu = false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
 }
 
-function sameVolume(paths: string[], dest: string): boolean {
-  const from = volumeOf(paths[0] ?? "");
-  if (!from) return false;
-  return paths.every((path) => volumeOf(path) === from) && volumeOf(dest) === from;
+function holdMenu() {
+  suppressMenu = true;
+  window.setTimeout(() => {
+    suppressMenu = false;
+  }, 400);
 }
 
-function dragAction(paths: string[], dest: string | null, shift: boolean, ctrl: boolean): { move: boolean; hint: string } {
+function dragAction(dest: string | null, ctrl: boolean, choose: boolean): { move: boolean; hint: string } {
   if (!dest) return { move: false, hint: "Release to cancel" };
+  if (choose) return { move: true, hint: "Release to choose" };
   if (ctrl) return { move: false, hint: "Ctrl copies" };
-  if (shift) return { move: true, hint: "Shift moves" };
-  return sameVolume(paths, dest) ? { move: true, hint: "Same drive" } : { move: false, hint: "Different drive" };
+  return { move: true, hint: "Release to move" };
+}
+
+function sameFolder(sources: string[], dest: string): boolean {
+  const folder = dest.replace(/[\\/]+$/, "").toLowerCase();
+  return sources.every((path) => parentPath(path).toLowerCase() === folder);
+}
+
+function panelSide(side: string | null): Side {
+  if (side === "left" || side === "right") return side;
+  return useApp.getState().active;
+}
+
+function offerDrop(x: number, y: number, sources: string[], dest: string, side: string | null) {
+  holdMenu();
+  if (sameFolder(sources, dest)) {
+    toast("warning", "Already in this folder.");
+    return;
+  }
+  useApp.getState().openContext({
+    x,
+    y,
+    side: panelSide(side),
+    paths: sources,
+    drop: { sources, dest },
+  });
 }
 
 function showSession(next: DragSession) {
@@ -86,7 +109,8 @@ type DragStart = {
 };
 
 export function armDrag(event: DragStart, readPaths: () => string[]) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 && event.button !== 2) return;
+  const choose = event.button === 2;
   const captured = event.currentTarget instanceof Element ? event.currentTarget : null;
   const pointerId = event.pointerId;
   if (captured) {
@@ -119,7 +143,7 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       if (!paths.length) return;
       active = true;
       const place = hit(ev.clientX, ev.clientY);
-      showSession({ paths, x: ev.clientX, y: ev.clientY, ...dragAction(paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey), ...place });
+      showSession({ paths, x: ev.clientX, y: ev.clientY, choose, ...dragAction(place.over, ev.ctrlKey || ev.metaKey, choose), ...place });
     }
     if (!session) return;
     if (ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight) {
@@ -131,7 +155,17 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       return;
     }
     const place = hit(ev.clientX, ev.clientY);
-    showSession({ ...session, x: ev.clientX, y: ev.clientY, ...dragAction(session.paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey), ...place });
+    showSession({ ...session, x: ev.clientX, y: ev.clientY, ...dragAction(place.over, ev.ctrlKey || ev.metaKey, session.choose), ...place });
+  };
+
+  const menu = (ev: MouseEvent) => {
+    if (!active || handedOff || !session) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const current = session;
+    finish();
+    if (!current.over) return;
+    offerDrop(ev.clientX, ev.clientY, current.paths, current.over.replace(/[\\/]+$/, ""), current.side);
   };
 
   const key = (ev: KeyboardEvent) => {
@@ -145,22 +179,26 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
       return;
     }
     if (!session) return;
-    const place = { over: session.over, side: session.side };
-    showSession({ ...session, ...dragAction(session.paths, place.over, ev.shiftKey, ev.ctrlKey || ev.metaKey) });
+    showSession({ ...session, ...dragAction(session.over, ev.ctrlKey || ev.metaKey, session.choose) });
   };
 
   const up = (ev: PointerEvent) => {
     const current = session;
     const dropped = active && !handedOff;
+    const pick = ev.button === 2 || current?.choose === true;
     finish();
     if (!dropped || !current?.over) return;
     const dest = current.over.replace(/[\\/]+$/, "");
     const sources = current.paths;
-    if (sources.every((path) => parentPath(path).toLowerCase() === dest.toLowerCase())) {
+    if (pick) {
+      offerDrop(ev.clientX, ev.clientY, sources, dest, current.side);
+      return;
+    }
+    if (sameFolder(sources, dest)) {
       toast("warning", "Already in this folder.");
       return;
     }
-    const action = dragAction(sources, dest, ev.shiftKey, ev.ctrlKey || ev.metaKey);
+    const action = dragAction(dest, ev.ctrlKey || ev.metaKey, false);
     void useApp.getState().beginTransfer(action.move ? "cut" : "copy", sources, dest);
   };
 
@@ -169,6 +207,7 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
     window.removeEventListener("pointerup", up);
     window.removeEventListener("keydown", key);
     window.removeEventListener("keyup", key);
+    window.removeEventListener("contextmenu", menu, true);
     window.removeEventListener("blur", finish);
     stopListeners = null;
     clearSession();
@@ -179,5 +218,6 @@ export function armDrag(event: DragStart, readPaths: () => string[]) {
   window.addEventListener("pointerup", up);
   window.addEventListener("keydown", key);
   window.addEventListener("keyup", key);
+  window.addEventListener("contextmenu", menu, true);
   window.addEventListener("blur", finish);
 }

@@ -22,6 +22,9 @@ export function CommandPalette() {
   const open = useApp((state) => state.paletteOpen);
   const setPalette = useApp((state) => state.setPalette);
   const mcpTools = useApp((state) => state.mcpTools);
+  const folderAppSupported = useApp((state) => state.folderAppSupported);
+  const folderApp = useApp((state) => state.folderApp);
+  const pathStyle = useApp((state) => state.pathStyle);
   const activePath = useApp((state) => state.panels[state.active].path);
   const [query, setQuery] = useState("");
   useEffect(() => {
@@ -46,10 +49,13 @@ export function CommandPalette() {
     { id: "scroll-lock", label: "Lock scroll", run: () => useApp.getState().toggleScrollLock() },
     { id: "hidden", label: "Toggle hidden files", run: () => useApp.getState().toggleHidden() },
     { id: "colors", label: "Icon colors", run: () => useApp.getState().askColors() },
+    { id: "path-style", label: pathStyle === "breadcrumb" ? "Show the path as text" : "Show the path as breadcrumbs", run: () => useApp.getState().setPathStyle(pathStyle === "breadcrumb" ? "text" : "breadcrumb") },
     { id: "light", label: "Light theme", run: () => useApp.getState().setTheme("light") },
     { id: "dark", label: "Dark theme", run: () => useApp.getState().setTheme("dark") },
+    { id: "glass", label: "Glass theme", run: () => useApp.getState().setTheme("glass") },
     { id: "retro", label: "Retro theme", run: () => useApp.getState().setTheme("retro") },
     { id: "about", label: "About FilePad", run: () => useApp.getState().askAbout() },
+    ...(folderAppSupported ? [{ id: "folder-app", label: folderApp ? "Open folders in File Explorer" : "Open folders in FilePad", run: () => void useApp.getState().setFolderApp(!folderApp) }] : []),
     { id: "sftp", label: "Connect with SFTP", run: () => useApp.getState().askSftp() },
     { id: "sftp-off", label: "Disconnect SFTP", disabled: !isRemotePath(activePath), run: (): void => { void useApp.getState().disconnectSftp(); } },
     { id: "servers", label: "MCP servers", run: () => useApp.getState().askServers() },
@@ -60,12 +66,12 @@ export function CommandPalette() {
       hint: tool.readOnly ? "Read" : "Confirm",
       run: () => openTool(tool),
     })),
-  ], [activePath, mcpTools]);
+  ], [activePath, folderApp, folderAppSupported, mcpTools, pathStyle]);
   if (!open) return null;
   const shown = commands.filter((command) => command.label.toLowerCase().includes(query.trim().toLowerCase()));
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/35 px-6 pt-24" onMouseDown={() => setPalette(false)}>
-      <div className="w-full max-w-lg overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="fp-float w-full max-w-lg overflow-hidden border border-[var(--border)] bg-[var(--surface)]" onMouseDown={(event) => event.stopPropagation()}>
         <input className="field w-full rounded-none border-0 border-b" autoFocus placeholder="Command" value={query} onChange={(event) => setQuery(event.target.value)} />
         <div className="max-h-80 overflow-auto p-1">
           {shown.map((command) => (

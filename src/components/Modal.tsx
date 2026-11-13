@@ -14,7 +14,7 @@ export function ModalHost() {
   if (!modal) return null;
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 p-6">
-      <div className={`w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl ${modal.type === "renameMany" || modal.type === "properties" || modal.type === "sftp" || modal.type === "servers" ? "max-w-xl" : "max-w-md"}`}>
+      <div className={`fp-float w-full border border-[var(--border)] bg-[var(--surface)] p-4 ${modal.type === "renameMany" || modal.type === "properties" || modal.type === "sftp" || modal.type === "servers" ? "max-w-xl" : "max-w-md"}`}>
         {modal.type === "delete" && <DeleteDialog />}
         {modal.type === "mkdir" && <NameDialog key="mkdir" title="New folder" label="Folder name" action="Create" onSubmit={(name) => void useApp.getState().confirmMkdir(name)} />}
         {modal.type === "mkfile" && <NameDialog key="mkfile" title="New file" label="File name" action="Create" initial="untitled.txt" onSubmit={(name) => void useApp.getState().confirmMkfile(name)} />}
@@ -75,11 +75,32 @@ function DeleteDialog() {
 
 function AboutDialog() {
   const closeModal = useApp((state) => state.closeModal);
+  const folderAppSupported = useApp((state) => state.folderAppSupported);
+  const folderApp = useApp((state) => state.folderApp);
+  const setFolderApp = useApp((state) => state.setFolderApp);
+  const pathStyle = useApp((state) => state.pathStyle);
+  const setPathStyle = useApp((state) => state.setPathStyle);
   return (
     <>
       <h2 className="text-base font-semibold">FilePad</h2>
       <p className="mt-2 text-sm">A two-panel file commander.</p>
       <p className="mt-3 text-sm text-[var(--muted)]">by Content Factory OÜ</p>
+      <h3 className="mt-4 text-sm font-semibold">Path bar</h3>
+      <p className="mt-1 text-sm text-[var(--muted)]">Breadcrumb shows each folder. The arrow next to a folder lists the folders inside it. Click the empty end of the bar to type a path. Text shows the path as a line.</p>
+      <div className="fp-switch mt-3" role="group" aria-label="Path bar">
+        <button type="button" data-active={pathStyle === "breadcrumb"} onClick={() => setPathStyle("breadcrumb")}>Breadcrumb</button>
+        <button type="button" data-active={pathStyle === "text"} onClick={() => setPathStyle("text")}>Text</button>
+      </div>
+      {folderAppSupported && (
+        <>
+          <h3 className="mt-4 text-sm font-semibold">Folders</h3>
+          <p className="mt-1 text-sm text-[var(--muted)]">Folders from the desktop, File Explorer, drives, and Win+E open here. If FilePad is already open, the folder opens in the active panel. An Open or Save window still uses File Explorer.</p>
+          <div className="fp-switch mt-3" role="group" aria-label="Open folders in FilePad">
+            <button type="button" data-active={folderApp} onClick={() => { if (!folderApp) void setFolderApp(true); }}>On</button>
+            <button type="button" data-active={!folderApp} onClick={() => { if (folderApp) void setFolderApp(false); }}>Off</button>
+          </div>
+        </>
+      )}
       <div className="mt-4 flex justify-end">
         <button className="btn primary" onClick={closeModal}>Close</button>
       </div>
@@ -439,6 +460,7 @@ const convertFormats = [
   { id: "jpg", label: "JPG" },
   { id: "png", label: "PNG" },
   { id: "webp", label: "WebP" },
+  { id: "avif", label: "AVIF" },
   { id: "bmp", label: "BMP" },
   { id: "gif", label: "GIF" },
 ];
@@ -454,6 +476,7 @@ function ConvertDialog() {
   const pictures = modal.paths.filter(isStillImage);
   const gif = pictures.some((path) => path.toLowerCase().endsWith(".gif"));
   const lossy = format === "jpg" || format === "bmp";
+  const qualityOn = format === "jpg" || format === "avif";
   return (
     <form
       onSubmit={(event) => {
@@ -468,7 +491,7 @@ function ConvertDialog() {
           <button key={item.id} type="button" data-active={format === item.id} onClick={() => setFormat(item.id)}>{item.label}</button>
         ))}
       </div>
-      {format === "jpg" && (
+      {qualityOn && (
         <label className="mt-3 flex items-center gap-2 text-sm text-[var(--muted)]">
           Quality
           <input className="min-w-0 flex-1" type="range" min={1} max={100} value={quality} onChange={(event) => setQuality(Number(event.target.value))} />

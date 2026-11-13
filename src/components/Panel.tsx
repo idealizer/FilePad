@@ -1,7 +1,7 @@
 import { AlignJustify, ChevronDown, ChevronLeft, ChevronRight, Disc, Download, Eye, FileText, Folder, FolderTree, HardDrive, House, Images, LayoutGrid, List, MemoryStick, Monitor, Network, PanelLeft, Pencil, Plus, Search, Trash2, Unplug, Usb } from "lucide-react";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { useDragSession } from "../lib/drag";
-import { displayPath, isRemotePath, storePath } from "../lib/format";
+import { type CSSProperties, type ReactNode } from "react";
+import { takeDragMenu, useDragSession } from "../lib/drag";
+import { displayPath, isRemotePath } from "../lib/format";
 import { ICON_COLUMNS_MAX, ICON_COLUMNS_MIN, iconColumnsFromZoom, iconColumnsOf, iconZoomOf } from "../lib/iconSize";
 import { fileRows, previewTarget } from "../lib/rows";
 import { useApp } from "../stores/appStore";
@@ -11,6 +11,7 @@ import { PanelNav } from "./PanelNav";
 import { FileList } from "./FileList";
 import { IconView } from "./IconView";
 import { Dropdown, MenuItem } from "./Menu";
+import { PathBar } from "./PathBar";
 import { PreviewPane } from "./PreviewPane";
 import { PanelStatus } from "./StatusBar";
 
@@ -55,12 +56,6 @@ export function Panel({ side }: { side: Side }) {
   const loadPlaces = useApp((state) => state.loadPlaces);
   const openContext = useApp((state) => state.openContext);
   const drag = useDragSession();
-  const shown = displayPath(panel.path, sftpProfiles);
-  const [draft, setDraft] = useState(shown);
-  const [editing, setEditing] = useState(false);
-  useEffect(() => {
-    if (!editing) setDraft(shown);
-  }, [shown, editing]);
 
   return (
     <section
@@ -81,9 +76,10 @@ export function Panel({ side }: { side: Side }) {
       onMouseDown={(event) => {
         setActive(side);
         const target = event.target;
-        if (target instanceof HTMLElement && !target.closest("input, textarea, button")) event.currentTarget.focus();
+        if (target instanceof HTMLElement && !target.closest("input, textarea, button, .fp-path")) event.currentTarget.focus();
       }}
       onContextMenu={(event) => {
+        if (takeDragMenu(event)) return;
         if (event.target instanceof Element && event.target.closest(".fp-row, .fp-nav, input, button, a")) return;
         event.preventDefault();
         setActive(side);
@@ -104,24 +100,7 @@ export function Panel({ side }: { side: Side }) {
         <button type="button" className="tb-btn" data-active={navOpen} data-tip="Sidebar" data-tip-align="start" onClick={() => { setActive(side); toggleNav(side); }}>
           <PanelLeft />
         </button>
-        <form
-          className="min-w-0 flex-1"
-          onSubmit={(event) => {
-            event.preventDefault();
-            setEditing(false);
-            void navigate(side, storePath(draft, panel.path));
-          }}
-        >
-          <input
-            className="field fp-path h-7 w-full"
-            value={draft}
-            spellCheck={false}
-            aria-label={`${side} folder`}
-            onFocus={() => setEditing(true)}
-            onBlur={() => setEditing(false)}
-            onChange={(event) => setDraft(event.target.value)}
-          />
-        </form>
+        <PathBar side={side} />
         {isRemotePath(panel.path) && (
           <button className="tb-btn fp-disconnect" data-tip="Disconnect" onClick={() => { setActive(side); void useApp.getState().disconnectSftp(side); }}>
             <Unplug />
@@ -217,7 +196,19 @@ export function Panel({ side }: { side: Side }) {
         {panel.view === "icons" && <IconSize side={side} />}
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2 top-1.5 h-3.5 w-3.5 text-[var(--muted)]" />
-          <input className="field fp-filter h-7 w-full pl-7" placeholder="Filter" value={panel.filter} onChange={(event) => setFilter(side, event.target.value)} />
+          <input
+            className="field fp-filter h-7 w-full pl-7"
+            placeholder="Filter or search"
+            data-tip="Type to filter this folder. Enter searches inside it."
+            data-tip-pos="top"
+            value={panel.filter}
+            onChange={(event) => setFilter(side, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              useApp.getState().searchDeeper(side);
+            }}
+          />
         </div>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1">

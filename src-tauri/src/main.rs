@@ -6,5 +6,8 @@ fn main() {
         filepad_lib::mcp_stdio();
         return;
     }
+    if filepad_lib::yield_folder_to_explorer() {
+        return;
+    }
     filepad_lib::run()
 }

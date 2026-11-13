@@ -13,7 +13,7 @@ const keys = [
 export function KeyBar() {
   const toggleKeyBar = useApp((state) => state.toggleKeyBar);
   return (
-    <div className="flex h-8 shrink-0 items-stretch overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
+    <div className="fp-chrome flex h-8 shrink-0 items-stretch overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
       {keys.map((item) => (
         <button key={item.key} className="fp-key min-w-0 flex-1" onClick={() => item.run(useApp.getState())}>
           <b>{item.key}</b>{item.label}

@@ -142,7 +142,7 @@ fn cp1252(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|&byte| match byte {
-            b'\n' | b'\r' => '\n',
+            b'\n' | b'\r' | 0x0B => '\n',
             b'\t' => ' ',
             0x80 => '€',
             0x82 => '‚',
@@ -183,14 +183,101 @@ fn readable(text: &str) -> bool {
 }
 
 fn doc_bytes(bytes: &[u8]) -> Result<String, String> {
-    let utf16 = utf16_text(bytes);
-    let latin = latin_text(bytes);
-    let best = if letters(&latin) > letters(&utf16) { latin } else { utf16 };
-    let text = tidy_lines(&best);
+    let word = crate::slides::ole_stream(bytes, "WordDocument").map_err(|_| "Can't read that document.".to_string())?;
+    let flags = word.get(0x0A..0x0C).map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap())).unwrap_or(0);
+    let table_name = if flags & 0x0200 != 0 { "1Table" } else { "0Table" };
+    let table = crate::slides::ole_stream(bytes, table_name).map_err(|_| "Can't read that document.".to_string())?;
+    let text = tidy_lines(&piece_text(&word, &table)?);
     if text.trim().is_empty() {
         return Err("That document has no readable text.".into());
     }
     Ok(text)
+}
+
+/// Word 97 piece table. Compressed pieces are Windows-1252; the rest are UTF-16LE.
+fn piece_text(word: &[u8], table: &[u8]) -> Result<String, String> {
+    let (fc, lcb) = clx_at(word)?;
+    let end = fc.checked_add(lcb).ok_or("That document can't be previewed.")?;
+    let clx = table.get(fc..end).ok_or("That document can't be previewed.")?;
+    let plc = pcdt(clx)?;
+    if plc.len() < 4 || (plc.len() - 4) % 12 != 0 {
+        return Err("That document can't be previewed.".into());
+    }
+    let count = (plc.len() - 4) / 12;
+    if count > 100_000 {
+        return Err("That document can't be previewed.".into());
+    }
+    let mut cps = Vec::with_capacity(count + 1);
+    for index in 0..=count {
+        let at = index * 4;
+        let cp = u32::from_le_bytes(plc[at..at + 4].try_into().unwrap());
+        cps.push(cp.max(cps.last().copied().unwrap_or(0)));
+    }
+    let mut out = String::new();
+    for index in 0..count {
+        if out.len() > 200_000 {
+            break;
+        }
+        let at = (count + 1) * 4 + index * 8 + 2;
+        let fc_raw = u32::from_le_bytes(plc[at..at + 4].try_into().unwrap());
+        let chars = cps[index + 1].saturating_sub(cps[index]) as usize;
+        let compressed = fc_raw & 0x4000_0000 != 0;
+        let start = (fc_raw & 0x3FFF_FFFF) as usize;
+        if compressed {
+            out.push_str(&cp1252(slice_at(word, start / 2, chars)));
+        } else {
+            out.push_str(&utf16_slice(slice_at(word, start, chars.saturating_mul(2))));
+        }
+    }
+    Ok(out)
+}
+
+fn slice_at(bytes: &[u8], at: usize, len: usize) -> &[u8] {
+    bytes.get(at..).map(|rest| &rest[..len.min(rest.len())]).unwrap_or_default()
+}
+
+fn clx_at(word: &[u8]) -> Result<(usize, usize), String> {
+    let ident = word.get(..2).map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap())).unwrap_or(0);
+    if ident != 0xA5EC || word.len() < 0x9A {
+        return Err("That document can't be previewed.".into());
+    }
+    let csw = u16::from_le_bytes(word[0x20..0x22].try_into().unwrap());
+    let cslw = u16::from_le_bytes(word[0x3E..0x40].try_into().unwrap());
+    if csw != 0x000E || cslw != 0x0016 {
+        return Err("That document can't be previewed.".into());
+    }
+    let pairs = u16::from_le_bytes(word[0x98..0x9A].try_into().unwrap()) as usize;
+    if pairs <= 33 {
+        return Err("That document can't be previewed.".into());
+    }
+    let at = 0x9A + 33 * 8;
+    let spot = word.get(at..at + 8).ok_or("That document can't be previewed.")?;
+    let fc = u32::from_le_bytes(spot[..4].try_into().unwrap()) as usize;
+    let lcb = u32::from_le_bytes(spot[4..].try_into().unwrap()) as usize;
+    if lcb == 0 {
+        return Err("That document can't be previewed.".into());
+    }
+    Ok((fc, lcb))
+}
+
+fn pcdt(clx: &[u8]) -> Result<&[u8], String> {
+    let mut index = 0;
+    while index < clx.len() {
+        match clx[index] {
+            0x01 => {
+                let cb = clx.get(index + 1..index + 3).map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap()) as usize).ok_or("That document can't be previewed.")?;
+                index = index.checked_add(3 + cb).ok_or("That document can't be previewed.")?;
+            }
+            0x02 => {
+                let lcb = clx.get(index + 1..index + 5).map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize).ok_or("That document can't be previewed.")?;
+                let start = index.checked_add(5).ok_or("That document can't be previewed.")?;
+                let end = start.checked_add(lcb).ok_or("That document can't be previewed.")?;
+                return clx.get(start..end).ok_or("That document can't be previewed.".into());
+            }
+            _ => return Err("That document can't be previewed.".into()),
+        }
+    }
+    Err("That document can't be previewed.".into())
 }
 
 fn tagged_text(xml: &str, tag: &str) -> String {
@@ -282,87 +369,6 @@ fn tidy_lines(text: &str) -> String {
     lines.join("\n")
 }
 
-fn letters(text: &str) -> usize {
-    text.chars().filter(|ch| ch.is_alphanumeric()).count()
-}
-
-fn utf16_text(bytes: &[u8]) -> String {
-    let even = utf16_at(bytes, 0);
-    let odd = utf16_at(bytes, 1);
-    if letters(&odd) > letters(&even) { odd } else { even }
-}
-
-fn utf16_at(bytes: &[u8], start: usize) -> String {
-    let mut out = String::new();
-    let mut run = String::new();
-    let mut words = 0usize;
-    let mut index = start;
-    while index + 1 < bytes.len() {
-        let unit = u16::from_le_bytes([bytes[index], bytes[index + 1]]);
-        if printable(unit) {
-            if unit > 127 || char::from_u32(unit as u32).is_some_and(|ch| ch.is_ascii_alphanumeric()) {
-                words += 1;
-            }
-            if let Some(ch) = char::from_u32(unit as u32) {
-                run.push(ch);
-            }
-            index += 2;
-            continue;
-        }
-        if matches!(unit, 0x0A | 0x0D | 0x0B | 0x0C) {
-            run.push('\n');
-            index += 2;
-            continue;
-        }
-        keep_run(&mut out, &mut run, &mut words);
-        index += 2;
-    }
-    keep_run(&mut out, &mut run, &mut words);
-    out
-}
-
-fn keep_run(out: &mut String, run: &mut String, words: &mut usize) {
-    if *words >= 6 {
-        out.push_str(run);
-        out.push('\n');
-    }
-    run.clear();
-    *words = 0;
-}
-
-fn printable(unit: u16) -> bool {
-    matches!(unit, 0x09 | 0x20..=0x7E | 0xA0..=0x24F | 0x2010..=0x2027 | 0x20AC)
-}
-
-fn latin_text(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    let mut run = String::new();
-    let mut words = 0usize;
-    for &byte in bytes {
-        if (0x20..=0x7E).contains(&byte) || byte == b'\t' {
-            if byte.is_ascii_alphanumeric() {
-                words += 1;
-            }
-            run.push(byte as char);
-            continue;
-        }
-        if byte == b'\n' || byte == b'\r' {
-            run.push('\n');
-            continue;
-        }
-        if words >= 12 {
-            out.push_str(&run);
-            out.push('\n');
-        }
-        run.clear();
-        words = 0;
-    }
-    if words >= 12 {
-        out.push_str(&run);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::text_of;
@@ -433,12 +439,100 @@ mod tests {
     }
 
     #[test]
-    fn reads_doc_utf16_text() {
-        let mut bytes = vec![0u8; 80];
-        for unit in "Operating instructions".encode_utf16() {
-            bytes.extend(unit.to_le_bytes());
+    fn reads_doc_cp1252_umlauts() {
+        let text_bytes = b"Gr\xf6\xdfe \xe4\xf6\xfc";
+        let (word, table) = word_with_piece(text_bytes, true);
+        let plain = super::piece_text(&word, &table).unwrap();
+        assert!(plain.contains("Größe"));
+        assert!(plain.contains('ä'));
+        assert!(plain.contains('ö'));
+        assert!(plain.contains('ü'));
+        let packed = pack_ole(&word, &table);
+        let text = text_of("doc", &packed).unwrap();
+        assert!(text.contains("Größe"));
+        assert!(text.contains('ä'));
+        assert!(text.contains('ö'));
+        assert!(text.contains('ü'));
+    }
+
+    fn word_with_piece(payload: &[u8], compressed: bool) -> (Vec<u8>, Vec<u8>) {
+        let mut word = vec![0u8; 4096];
+        word[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
+        word[0x20..0x22].copy_from_slice(&0x000Eu16.to_le_bytes());
+        word[0x3E..0x40].copy_from_slice(&0x0016u16.to_le_bytes());
+        word[0x98..0x9A].copy_from_slice(&34u16.to_le_bytes());
+        let chars = if compressed { payload.len() } else { payload.len() / 2 };
+        let mut plc = Vec::new();
+        plc.extend(0u32.to_le_bytes());
+        plc.extend((chars as u32).to_le_bytes());
+        plc.extend(0u16.to_le_bytes());
+        let fc = if compressed { (1024u32 * 2) | 0x4000_0000 } else { 1024 };
+        plc.extend(fc.to_le_bytes());
+        plc.extend(0u16.to_le_bytes());
+        let mut table = vec![0x02];
+        table.extend((plc.len() as u32).to_le_bytes());
+        table.extend(plc);
+        let at = 0x9A + 33 * 8;
+        word[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+        word[at + 4..at + 8].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        word[1024..1024 + payload.len()].copy_from_slice(payload);
+        (word, table)
+    }
+
+    fn pack_ole(word: &[u8], table: &[u8]) -> Vec<u8> {
+        let sector = 512usize;
+        let word_sectors = word.len().div_ceil(sector);
+        let mini_id = 2 + word_sectors as u32;
+        let minifat_id = mini_id + 1;
+        let mut file = vec![0u8; sector * (minifat_id as usize + 2)];
+        file[..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+        file[0x18..0x1A].copy_from_slice(&0x003Eu16.to_le_bytes());
+        file[0x1A..0x1C].copy_from_slice(&3u16.to_le_bytes());
+        file[0x1C..0x1E].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        file[0x1E..0x20].copy_from_slice(&9u16.to_le_bytes());
+        file[0x20..0x22].copy_from_slice(&6u16.to_le_bytes());
+        file[0x2C..0x30].copy_from_slice(&1u32.to_le_bytes());
+        file[0x30..0x34].copy_from_slice(&1u32.to_le_bytes());
+        file[0x38..0x3C].copy_from_slice(&4096u32.to_le_bytes());
+        file[0x3C..0x40].copy_from_slice(&minifat_id.to_le_bytes());
+        file[0x40..0x44].copy_from_slice(&1u32.to_le_bytes());
+        file[0x44..0x48].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes());
+        file[0x4C..0x50].copy_from_slice(&0u32.to_le_bytes());
+        let mut fat = vec![0xFFFFFFFFu32; sector / 4];
+        fat[0] = 0xFFFFFFFD;
+        fat[1] = 0xFFFFFFFE;
+        for index in 0..word_sectors {
+            let here = 2 + index;
+            fat[here] = if index + 1 == word_sectors { 0xFFFFFFFE } else { (here as u32) + 1 };
         }
-        let text = text_of("doc", &bytes).unwrap();
-        assert!(text.contains("Operating instructions"));
+        fat[mini_id as usize] = 0xFFFFFFFE;
+        fat[minifat_id as usize] = 0xFFFFFFFE;
+        for (index, value) in fat.iter().enumerate() {
+            file[sector + index * 4..sector + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let word_at = sector * (1 + 2);
+        file[word_at..word_at + word.len()].copy_from_slice(word);
+        let mini_at = sector * (1 + mini_id as usize);
+        file[mini_at..mini_at + table.len()].copy_from_slice(table);
+        let minifat_at = sector * (1 + minifat_id as usize);
+        file[minifat_at..minifat_at + 4].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes());
+        let dir_at = sector * 2;
+        ole_entry(&mut file[dir_at..], 0, "Root Entry", 5, mini_id, 64);
+        ole_entry(&mut file[dir_at..], 1, "WordDocument", 2, 2, word.len() as u64);
+        ole_entry(&mut file[dir_at..], 2, "0Table", 2, 0, table.len() as u64);
+        file
+    }
+
+    fn ole_entry(dir: &mut [u8], index: usize, name: &str, kind: u8, start: u32, size: u64) {
+        let entry = &mut dir[index * 128..(index + 1) * 128];
+        let mut units: Vec<u16> = name.encode_utf16().collect();
+        units.push(0);
+        for (offset, unit) in units.iter().enumerate() {
+            entry[offset * 2..offset * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        entry[64..66].copy_from_slice(&((units.len() * 2) as u16).to_le_bytes());
+        entry[66] = kind;
+        entry[116..120].copy_from_slice(&start.to_le_bytes());
+        entry[120..124].copy_from_slice(&(size as u32).to_le_bytes());
     }
 }

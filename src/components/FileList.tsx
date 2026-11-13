@@ -1,9 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef } from "react";
-import { armDrag, useDragSession } from "../lib/drag";
+import { armDrag, takeDragMenu, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
-import { formatBytes, formatWhen, typeLabel } from "../lib/format";
-import { fileRows, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
+import { formatBytes, formatWhen, parentPath, typeLabel } from "../lib/format";
+import { fileRows, folderNote, markSet, otherNames, pairMark, parentClick, parentDoubleClick, type Row } from "../lib/rows";
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
@@ -40,6 +40,7 @@ export function FileList({ side }: { side: Side }) {
   const otherFilter = useApp((state) => state.panels[side === "left" ? "right" : "left"].filter);
   const pairs = useMemo(() => (scrollLock ? otherNames(otherEntries, showHidden, otherFilter) : null), [scrollLock, otherEntries, showHidden, otherFilter]);
   const rows = fileRows(panel, showHidden);
+  const marks = markSet(panel.marked);
   const parent = useRef<HTMLDivElement>(null);
   useLinkedScroll(side, parent);
   const fromPointer = useRef(false);
@@ -63,12 +64,11 @@ export function FileList({ side }: { side: Side }) {
       <SortHead side={side} />
       <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
-        {!panel.error && panel.loading && <div className="px-3 py-6 text-center text-[var(--muted)]">Reading…</div>}
-        {!panel.error && !panel.loading && rows.length === 0 && <div className="px-3 py-6 text-center text-[var(--muted)]">This folder is empty.</div>}
+        {folderNote(panel, rows.length, showHidden) && <div className="px-3 py-6 text-center text-[var(--muted)]">{folderNote(panel, rows.length, showHidden)}</div>}
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
           {virtualizer.getVirtualItems().map((item) => {
             const row = rows[item.index];
-            const marked = panel.marked.includes(row.path);
+            const marked = marks.has(row.path);
             const dropPath = dropTarget(row, panel.path, panel.parent);
             return (
               <div
@@ -93,7 +93,7 @@ export function FileList({ side }: { side: Side }) {
                   else clickEntry(side, item.index);
                 }}
                 onPointerDown={(event) => {
-                  if (event.button !== 0 || row.up) return;
+                  if ((event.button !== 0 && event.button !== 2) || row.up) return;
                   if (event.target instanceof Element && event.target.closest("button, input, a")) return;
                   const path = row.path;
                   armDrag(event, () => {
@@ -109,6 +109,7 @@ export function FileList({ side }: { side: Side }) {
                   void openCurrent();
                 }}
                 onContextMenu={(event) => {
+                  if (takeDragMenu(event)) return;
                   event.preventDefault();
                   event.stopPropagation();
                   if (row.up) {
@@ -116,7 +117,7 @@ export function FileList({ side }: { side: Side }) {
                     openContext({ x: event.clientX, y: event.clientY, side, paths: [] });
                     return;
                   }
-                  const keep = panel.marked.includes(row.path);
+                  const keep = marks.has(row.path);
                   focusForMenu(side, item.index, row.path);
                   openContext({ x: event.clientX, y: event.clientY, side, paths: keep ? panel.marked : [row.path] });
                 }}
@@ -124,6 +125,7 @@ export function FileList({ side }: { side: Side }) {
                 <span className="flex min-w-0 items-center gap-2">
                   <FileIcon isDir={row.isDir} extension={row.extension} up={row.up} />
                   {row.up ? <span className="truncate">{row.name}</span> : <FileName className="min-w-0 flex-1 truncate" name={row.name} path={row.path} isDir={row.isDir} selected={item.index === panel.cursor} activate="slow" />}
+                  {row.place && <span className="fp-place">{row.place}</span>}
                 </span>
                 {panel.view === "details" && (
                   <>
@@ -144,5 +146,6 @@ export function FileList({ side }: { side: Side }) {
 function dropTarget(row: Row, folder: string, parent: string | null): string {
   if (row.up) return parent ?? folder;
   if (row.isDir) return row.path;
+  if (row.place) return parentPath(row.path);
   return folder;
 }

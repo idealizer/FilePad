@@ -1,11 +1,31 @@
 use crate::{gzipnav, zipnav};
-use image::imageops::{overlay, FilterType};
-use image::{DynamicImage, ImageEncoder, ImageFormat, ImageReader, Limits, Rgba, RgbaImage};
-use serde::Serialize;
+use image::imageops::{blur, crop_imm, overlay, FilterType};
+use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits, Rgba, RgbaImage};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+
+fn blur_sigma(strength: f32) -> f32 {
+    if strength.is_finite() { strength.clamp(1.0, 64.0) } else { 16.0 }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlurSpot {
+    pub shape: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    #[serde(default = "blur_mode")]
+    pub mode: String,
+}
+
+fn blur_mode() -> String {
+    "blur".into()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,14 +73,17 @@ pub fn trim_image(
     quarters: i32,
     flip_h: bool,
     flip_v: bool,
+    tone: &str,
+    spots: &[BlurSpot],
+    strength: f32,
 ) -> Result<String, String> {
     let format = normalize_format(format)?;
     if zipnav::split(raw).is_some() || gzipnav::split(raw).is_some() {
         return Err("Copy the picture out of the archive before saving a change.".into());
     }
     let source = PathBuf::from(raw.trim());
-    let bytes = fs::read(&source).map_err(|err| format!("Can't read that picture: {err}"))?;
-    let image = orient(decode_image(&bytes)?, quarters, flip_h, flip_v);
+    let image = orient(load_path(&source)?, quarters, flip_h, flip_v);
+    let image = restyle(image, tone, spots, strength);
     let painted = paint(image, view_x, view_y, view_width, view_height, out_width, out_height, background, format)?;
     let encoded = encode(&painted, format, quality.clamp(1, 100), background)?;
     let dest = place(&source, format, &HashSet::new())?;
@@ -156,8 +179,7 @@ fn convert_one(raw: &str, format: &str, quality: u8, background: &str, replace: 
     if dest.exists() && !replace {
         return Err("A file with that name is already there.".into());
     }
-    let bytes = fs::read(&source).map_err(|err| format!("Can't read that picture: {err}"))?;
-    let image = decode_image(&bytes)?;
+    let image = load_path(&source)?;
     let encoded = encode(&image, format, quality, background)?;
     write_new(&dest, &encoded)?;
     claimed.insert(key(&dest));
@@ -232,9 +254,39 @@ fn encode(image: &DynamicImage, format: &str, quality: u8, background: &str) -> 
             rgb.write_to(&mut cursor, ImageFormat::Bmp).map_err(fail)?;
         }
         "gif" => image.write_to(&mut cursor, ImageFormat::Gif).map_err(fail)?,
-        _ => return Err("Choose JPG, PNG, WebP, BMP, or GIF.".into()),
+        "avif" => return encode_avif(image, quality),
+        _ => return Err("Choose JPG, PNG, WebP, BMP, GIF, or AVIF.".into()),
     }
     Ok(cursor.into_inner())
+}
+
+fn encode_avif(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let rgba = image.to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let pixels = rgba.into_raw();
+    let quality = quality.clamp(1, 99);
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("filepad-avif".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut cursor = Cursor::new(Vec::new());
+                image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut cursor, 10, quality)
+                    .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+                    .map_err(|err| err.to_string())?;
+                Ok::<Vec<u8>, String>(cursor.into_inner())
+            }));
+            let message = match encoded {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(err)) => Err(format!("Can't save that picture: {err}")),
+                Err(_) => Err("Can't save that picture as AVIF.".into()),
+            };
+            let _ = send.send(message);
+        })
+        .map_err(|err| format!("Can't save that picture: {err}"))?;
+    recv.recv().unwrap_or_else(|_| Err("Can't save that picture as AVIF.".into()))
 }
 
 fn flatten(image: &DynamicImage, background: &str) -> DynamicImage {
@@ -246,6 +298,145 @@ fn flatten(image: &DynamicImage, background: &str) -> DynamicImage {
     let mut canvas = image::RgbaImage::from_pixel(image.width(), image.height(), pixel);
     image::imageops::overlay(&mut canvas, &image.to_rgba8(), 0, 0);
     DynamicImage::ImageRgba8(canvas)
+}
+
+pub fn restyle(image: DynamicImage, tone: &str, spots: &[BlurSpot], strength: f32) -> DynamicImage {
+    let image = apply_tone(image, tone);
+    if spots.is_empty() {
+        image
+    } else {
+        blur_spots(image, spots, strength)
+    }
+}
+
+fn apply_tone(image: DynamicImage, tone: &str) -> DynamicImage {
+    match tone {
+        "bw" => image.grayscale(),
+        "sepia" => sepia(image),
+        _ => image,
+    }
+}
+
+fn sepia(image: DynamicImage) -> DynamicImage {
+    let mut rgba = image.to_rgba8();
+    for pixel in rgba.pixels_mut() {
+        let red = pixel[0] as f32;
+        let green = pixel[1] as f32;
+        let blue = pixel[2] as f32;
+        pixel[0] = (0.393 * red + 0.769 * green + 0.189 * blue).min(255.0) as u8;
+        pixel[1] = (0.349 * red + 0.686 * green + 0.168 * blue).min(255.0) as u8;
+        pixel[2] = (0.272 * red + 0.534 * green + 0.131 * blue).min(255.0) as u8;
+    }
+    DynamicImage::ImageRgba8(rgba)
+}
+
+fn blur_spots(image: DynamicImage, spots: &[BlurSpot], strength: f32) -> DynamicImage {
+    let mut base = image.to_rgba8();
+    let sigma = blur_sigma(strength);
+    for spot in spots {
+        blur_one(&mut base, spot, sigma);
+    }
+    DynamicImage::ImageRgba8(base)
+}
+
+fn mix_pixel(original: Rgba<u8>, sample: Rgba<u8>, cover: f32) -> Rgba<u8> {
+    let cover = cover.clamp(0.0, 1.0);
+    let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * cover).round() as u8;
+    Rgba([mix(original[0], sample[0]), mix(original[1], sample[1]), mix(original[2], sample[2]), mix(original[3], sample[3])])
+}
+
+fn blur_one(base: &mut RgbaImage, spot: &BlurSpot, sigma: f32) {
+    let width = base.width() as f64;
+    let height = base.height() as f64;
+    if !spot.x.is_finite() || !spot.y.is_finite() || !spot.w.is_finite() || !spot.h.is_finite() || spot.w < 2.0 || spot.h < 2.0 {
+        return;
+    }
+    let left_f = spot.x.max(0.0);
+    let top_f = spot.y.max(0.0);
+    let right_f = (spot.x + spot.w).min(width);
+    let bottom_f = (spot.y + spot.h).min(height);
+    if right_f - left_f < 2.0 || bottom_f - top_f < 2.0 {
+        return;
+    }
+    let left = left_f.floor() as u32;
+    let top = top_f.floor() as u32;
+    let right = right_f.ceil().min(base.width() as f64) as u32;
+    let bottom = bottom_f.ceil().min(base.height() as f64) as u32;
+    let oval = spot.shape.eq_ignore_ascii_case("oval");
+    let censor = spot.mode.eq_ignore_ascii_case("black") || spot.mode.eq_ignore_ascii_case("censor");
+    if censor {
+        let radius_x = (right_f - left_f) / 2.0;
+        let radius_y = (bottom_f - top_f) / 2.0;
+        let center_x = left_f + radius_x;
+        let center_y = top_f + radius_y;
+        let ink = Rgba([0, 0, 0, 255]);
+        for py in top..bottom.min(base.height()) {
+            for px in left..right.min(base.width()) {
+                if oval {
+                    if radius_x < 0.5 || radius_y < 0.5 {
+                        continue;
+                    }
+                    let dx = (px as f64 + 0.5 - center_x) / radius_x;
+                    let dy = (py as f64 + 0.5 - center_y) / radius_y;
+                    if dx * dx + dy * dy > 1.0 {
+                        continue;
+                    }
+                }
+                base.put_pixel(px, py, ink);
+            }
+        }
+        return;
+    }
+    let feather = (sigma * 0.5).clamp(2.0, 32.0);
+    let pad = (sigma * 3.0 + feather).ceil() as u32;
+    let crop_x = left.saturating_sub(pad);
+    let crop_y = top.saturating_sub(pad);
+    let crop_right = right.saturating_add(pad).min(base.width());
+    let crop_bottom = bottom.saturating_add(pad).min(base.height());
+    let crop_w = crop_right.saturating_sub(crop_x);
+    let crop_h = crop_bottom.saturating_sub(crop_y);
+    if crop_w == 0 || crop_h == 0 {
+        return;
+    }
+    let cropped = crop_imm(base, crop_x, crop_y, crop_w, crop_h).to_image();
+    let blurred = blur(&cropped, sigma);
+    let radius_x = (right_f - left_f) / 2.0;
+    let radius_y = (bottom_f - top_f) / 2.0;
+    let center_x = left_f + radius_x;
+    let center_y = top_f + radius_y;
+    let spread = feather.ceil() as i32;
+    let left_px = (left as i32 - spread).max(0) as u32;
+    let top_px = (top as i32 - spread).max(0) as u32;
+    let right_px = ((right as i32 + spread).max(0) as u32).min(base.width());
+    let bottom_px = ((bottom as i32 + spread).max(0) as u32).min(base.height());
+    for py in top_px..bottom_px {
+        for px in left_px..right_px {
+            let cover = if oval {
+                if radius_x < 0.5 || radius_y < 0.5 {
+                    continue;
+                }
+                let dx = (px as f64 + 0.5 - center_x) / radius_x;
+                let dy = (py as f64 + 0.5 - center_y) / radius_y;
+                let inside = (1.0 - (dx * dx + dy * dy).sqrt()) * radius_x.min(radius_y);
+                ((inside + feather as f64) / (feather as f64 * 2.0)).clamp(0.0, 1.0) as f32
+            } else {
+                let edge_x = (px as i32 - left as i32).min(right as i32 - 1 - px as i32) as f32;
+                let edge_y = (py as i32 - top as i32).min(bottom as i32 - 1 - py as i32) as f32;
+                ((edge_x.min(edge_y) + feather) / (feather * 2.0)).clamp(0.0, 1.0)
+            };
+            if cover <= 0.0 {
+                continue;
+            }
+            let sx = px.saturating_sub(crop_x);
+            let sy = py.saturating_sub(crop_y);
+            if sx >= blurred.width() || sy >= blurred.height() {
+                continue;
+            }
+            let sample = *blurred.get_pixel(sx, sy);
+            let original = *base.get_pixel(px, py);
+            base.put_pixel(px, py, mix_pixel(original, sample, cover));
+        }
+    }
 }
 
 fn orient(mut image: DynamicImage, quarters: i32, flip_h: bool, flip_v: bool) -> DynamicImage {
@@ -264,6 +455,26 @@ fn orient(mut image: DynamicImage, quarters: i32, flip_h: bool, flip_v: bool) ->
     image
 }
 
+pub fn load_image(bytes: &[u8]) -> Result<DynamicImage, String> {
+    decode_image(bytes)
+}
+
+pub fn load_path(path: &Path) -> Result<DynamicImage, String> {
+    let bytes = fs::read(path).map_err(|err| format!("Can't read that picture: {err}"))?;
+    match decode_image(&bytes) {
+        Ok(image) => Ok(image),
+        Err(err) => {
+            #[cfg(windows)]
+            if extension_of(path) == "avif" {
+                if let Ok(image) = crate::preview::wic_image(path) {
+                    return Ok(image);
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
 fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|err| err.to_string())?;
     let mut limits = Limits::default();
@@ -271,7 +482,41 @@ fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
     limits.max_image_height = Some(32_000);
     limits.max_alloc = Some(1024 * 1024 * 1024);
     reader.limits(limits);
-    reader.decode().map_err(|_| "Can't read that picture.".to_string())
+    let mut decoder = reader.into_decoder().map_err(|_| "Can't read that picture.".to_string())?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| "Can't read that picture.".to_string())?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
+pub fn save_edit(source: &Path, image: &DynamicImage) -> Result<String, String> {
+    let ext = extension_of(source);
+    let format = normalize_format(&ext)?;
+    let quality = if format == "jpg" || format == "avif" { 90 } else { 100 };
+    let encoded = encode(image, format, quality, "white")?;
+    let dest = edited_path(source)?;
+    write_new(&dest, &encoded)?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+fn edited_path(source: &Path) -> Result<PathBuf, String> {
+    let parent = source.parent().filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| "Can't save next to that picture.".to_string())?;
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| "That picture needs a name.".to_string())?;
+    let ext = extension_of(source);
+    let mut candidate = parent.join(format!("{stem}-edit.{ext}"));
+    let mut n = 2u32;
+    while candidate.exists() {
+        candidate = parent.join(format!("{stem}-edit ({n}).{ext}"));
+        n += 1;
+        if n > 10000 {
+            return Err("Too many files would share this name.".into());
+        }
+    }
+    Ok(candidate)
 }
 
 fn normalize_format(format: &str) -> Result<&'static str, String> {
@@ -281,12 +526,13 @@ fn normalize_format(format: &str) -> Result<&'static str, String> {
         "webp" => Ok("webp"),
         "bmp" => Ok("bmp"),
         "gif" => Ok("gif"),
-        _ => Err("Choose JPG, PNG, WebP, BMP, or GIF.".into()),
+        "avif" => Ok("avif"),
+        _ => Err("Choose JPG, PNG, WebP, BMP, GIF, or AVIF.".into()),
     }
 }
 
 fn is_still(extension: &str) -> bool {
-    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif")
 }
 
 fn same_format(extension: &str, format: &str) -> bool {
@@ -333,7 +579,7 @@ fn key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_images, trim_image};
+    use super::{convert_images, restyle, trim_image, BlurSpot};
     use image::{DynamicImage, Rgba, RgbaImage};
     use std::fs;
     use std::path::PathBuf;
@@ -370,7 +616,7 @@ mod tests {
         assert_eq!(again.written, 0);
         assert_eq!(again.reason.as_deref(), Some("Already that format."));
 
-        let out = trim_image(&src.to_string_lossy(), "png", 85, "white", 2.0, 1.0, 3.0, 2.0, 3, 2, 0, false, false).unwrap();
+        let out = trim_image(&src.to_string_lossy(), "png", 85, "white", 2.0, 1.0, 3.0, 2.0, 3, 2, 0, false, false, "", &[], 0.0).unwrap();
         let cropped = image::open(&out).unwrap();
         assert_eq!((cropped.width(), cropped.height()), (3, 2));
         assert!(out.ends_with("dot-trim.png"));
@@ -378,7 +624,7 @@ mod tests {
 
         let wide = dir.0.join("wide.png");
         image.save(&wide).unwrap();
-        let scaled = trim_image(&wide.to_string_lossy(), "jpg", 85, "white", 0.0, 0.0, 8.0, 6.0, 4, 3, 0, false, false).unwrap();
+        let scaled = trim_image(&wide.to_string_lossy(), "jpg", 85, "white", 0.0, 0.0, 8.0, 6.0, 4, 3, 0, false, false, "", &[], 0.0).unwrap();
         let fitted = image::open(&scaled).unwrap();
         assert_eq!((fitted.width(), fitted.height()), (4, 3));
 
@@ -389,5 +635,40 @@ mod tests {
             let saved = image::open(dir.0.join(format!("dot.{format}"))).unwrap();
             assert_eq!((saved.width(), saved.height()), (8, 6), "{format}");
         }
+    }
+
+    #[test]
+    fn sepia_warms_red_and_blur_hides_only_the_marked_spot() {
+        let red = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 0])));
+        let warm = restyle(red, "sepia", &[], 14.0).to_rgb8();
+        let pixel = warm.get_pixel(0, 0);
+        assert!(pixel[0] > pixel[1] && pixel[1] > pixel[2] && pixel[0] < 200);
+
+        let split = DynamicImage::ImageRgb8(image::RgbImage::from_fn(80, 40, |x, _| {
+            if x < 40 { image::Rgb([0, 0, 0]) } else { image::Rgb([255, 255, 255]) }
+        }));
+        let square = [BlurSpot { shape: "square".into(), x: 28.0, y: 12.0, w: 24.0, h: 16.0, mode: "blur".into() }];
+        let blurred = restyle(split.clone(), "color", &square, 14.0).to_rgb8();
+        assert_eq!(blurred.get_pixel(0, 0).0, [0, 0, 0]);
+        let mixed = blurred.get_pixel(40, 20)[0];
+        assert!(mixed > 30 && mixed < 225);
+
+        let oval = [BlurSpot { shape: "oval".into(), x: 28.0, y: 12.0, w: 24.0, h: 16.0, mode: "blur".into() }];
+        let page = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(12, 8, image::Rgb([255, 255, 255])));
+        let blocked = [BlurSpot { shape: "square".into(), x: 2.0, y: 1.0, w: 4.0, h: 3.0, mode: "black".into() }];
+        let hidden = restyle(page, "color", &blocked, 14.0).to_rgb8();
+        assert_eq!(hidden.get_pixel(3, 2).0, [0, 0, 0]);
+        assert_eq!(hidden.get_pixel(0, 0).0, [255, 255, 255]);
+        let ovalled = restyle(split, "bw", &oval, 14.0).to_rgb8();
+        assert_eq!(ovalled.get_pixel(0, 0).0, [0, 0, 0]);
+        assert!(ovalled.get_pixel(40, 20)[0] > 30);
+    }
+
+    #[test]
+    fn avif_encode_writes_an_avif_file() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb([220, 20, 40])));
+        let bytes = super::encode(&image, "avif", 60, "white").unwrap();
+        assert!(bytes.windows(4).any(|mark| mark == b"ftyp"));
+        assert!(bytes.windows(4).any(|mark| mark == b"avif"));
     }
 }

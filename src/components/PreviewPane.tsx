@@ -1,15 +1,17 @@
 import DOMPurify from "dompurify";
-import { ChevronLeft, ChevronRight, ClipboardCopy, Crop, FileText, FlipHorizontal, FlipVertical, FoldHorizontal, FolderOpen, FolderOutput, FolderSearch, Mail, PanelRight, PanelTop, Pause, Play, Plus, Printer, Replace, RotateCcw, RotateCw, Save, Share2, Square, SquareCheck, Table2, Volume2, VolumeX, X } from "lucide-react";
+import { AppWindow, Blend, Cast, ChevronLeft, ChevronRight, Circle, ClipboardCopy, Code, Contrast, Crop, FileText, FlipHorizontal, FlipVertical, FoldHorizontal, FolderOpen, FolderOutput, FolderSearch, Mail, PanelRight, PanelTop, Pause, Play, Plus, Printer, Replace, RotateCcw, RotateCw, Save, Share2, Square, SquareCheck, Table2, Volume2, VolumeX, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from "react";
+import { createPortal } from "react-dom";
 import { baseName, formatBytes, formatWhen, isPackedPath, isRemotePath, typeLabel } from "../lib/format";
-import { fileRows, treeRows } from "../lib/rows";
+import { fileRows, markSet, treeRows } from "../lib/rows";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
+import { castPause, castResume, castSeek, setCastActive, watchCast } from "../lib/castSession";
 import { CodeView } from "./CodeView";
 import { FileName } from "./FileName";
 import { Dropdown, MenuItem } from "./Menu";
-import { useApp } from "../stores/appStore";
-import { toast } from "../stores/toastStore";
-import type { DirListing, Entry, PreviewFile, Side, ThemeMode } from "../types";
+import { takeListId, useApp } from "../stores/appStore";
+import { jobFinish, jobStart, jobUpdate, toast } from "../stores/toastStore";
+import type { DirListing, Entry, ListBatch, PreviewFile, Side, ThemeMode } from "../types";
 
 type PreviewChrome = {
   beside: boolean;
@@ -44,7 +46,7 @@ function useToolsBeside(): [boolean, (next: boolean) => void] {
 }
 
 const imageMime: Record<string, string> = {
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", avif: "image/avif", svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon",
 };
 
 export function PreviewPane({ side }: { side: Side }) {
@@ -63,7 +65,7 @@ export function PreviewPane({ side }: { side: Side }) {
   const clickEntry = useApp((state) => state.clickEntry);
   const toggleMark = useApp((state) => state.toggleMark);
   const listed = sourcePanel.view === "tree" ? treeRows(sourcePanel, showHidden) : fileRows(sourcePanel, showHidden);
-  const marked = file !== null && sourcePanel.view !== "tree" && sourcePanel.marked.includes(file.path);
+  const marked = file !== null && sourcePanel.view !== "tree" && markSet(sourcePanel.marked).has(file.path);
   const neighbors = neighborFiles(listed, sourcePanel.cursor);
   const stepFile = (index: number) => {
     if (index < 0) return;
@@ -78,11 +80,16 @@ export function PreviewPane({ side }: { side: Side }) {
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
   const [tableOn, setTableOn] = useState(true);
+  const [pageOn, setPageOn] = useState(false);
+  const [pageText, setPageText] = useState("");
+  const htmlText = useRef<(() => string) | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const filePath = file?.path ?? "";
   const [tablePath, setTablePath] = useState(filePath);
   if (tablePath !== filePath) {
     setTablePath(filePath);
     setTableOn(true);
+    setPageOn(false);
   }
 
   useEffect(() => {
@@ -99,7 +106,8 @@ export function PreviewPane({ side }: { side: Side }) {
         if (!cancel) setPreview(next);
       })
       .catch((reason: unknown) => {
-        if (!cancel) setError(message(reason));
+        if (cancel || message(reason) === "cancelled") return;
+        setError(message(reason));
       })
       .finally(() => {
         if (!cancel) setLoading(false);
@@ -123,9 +131,15 @@ export function PreviewPane({ side }: { side: Side }) {
             activate="click"
           />
         ) : (
-          <span className="min-w-0 flex-1 truncate">{row?.up ? row.name : "Preview"}</span>
+          <span className="min-w-0 flex-1 truncate">{row?.up ? "Parent folder of the other panel" : "Preview"}</span>
         )}
         {file && <span className="text-xs text-[var(--muted)]">{formatBytes(file.size)}</span>}
+        {(preview?.extension === "html" || preview?.extension === "htm") && preview.kind === "text" && (
+          <div className="seg" role="tablist" aria-label="HTML view">
+            <button data-active={!pageOn} data-tip="Code" onClick={() => setPageOn(false)}><Code />Code</button>
+            <button data-active={pageOn} data-tip="HTML" onClick={() => { setPageText(htmlText.current?.() ?? preview.text ?? ""); setPageOn(true); }}><AppWindow />HTML</button>
+          </div>
+        )}
         {preview?.kind === "csv" && (
           <div className="seg" role="tablist" aria-label="CSV view">
             <button data-active={!tableOn} data-tip="Text" onClick={() => setTableOn(false)}><FileText />Text</button>
@@ -133,27 +147,47 @@ export function PreviewPane({ side }: { side: Side }) {
           </div>
         )}
         {file && <PreviewActions path={file.path} extension={file.extension} />}
+        {file && preview && preview.path === file.path && (preview.kind === "audio" || (preview.kind === "video" && preview.extension !== "vob")) && (
+          <CastButton
+            path={file.path}
+            kind={preview.kind === "audio" ? "audio" : "video"}
+            disabled={isPackedPath(file.path) || isRemotePath(file.path)}
+            onStart={() => {
+              bodyRef.current?.querySelectorAll("video, audio").forEach((node) => {
+                if (!(node instanceof HTMLMediaElement)) return;
+                node.muted = true;
+                try { node.currentTime = 0; } catch { /* the file is still opening */ }
+                void node.play().catch(() => {});
+              });
+            }}
+            onStop={() => {
+              bodyRef.current?.querySelectorAll("video, audio").forEach((node) => {
+                if (node instanceof HTMLMediaElement) node.pause();
+              });
+            }}
+          />
+        )}
         {file && <button className="tb-btn" data-tip="Open" onClick={() => void openExternal(file.path).catch((reason: unknown) => toast("error", message(reason)))}><FolderOpen /></button>}
         {file && textpad && (preview?.kind === "text" || preview?.kind === "csv") && (
           <button className="btn sm" onClick={() => void openInTextpad()}>TextPad</button>
         )}
       </div>
       <PreviewChromeContext.Provider value={chrome}>
-      <div className="relative min-h-0 min-w-0 flex-1">
+      <div ref={bodyRef} className="relative min-h-0 min-w-0 flex-1">
         <div className={`h-full min-h-0 min-w-0 ${preview?.kind === "slides" || preview?.kind === "video" ? "overflow-hidden" : "overflow-auto"}`}>
           {treeRow?.isDir && <ListingView listPath={treeRow.path} source={source} />}
           {!treeRow && !row && <Empty text="Select a file in the other panel." />}
-          {!treeRow && row?.up && <Empty text="Parent folder" />}
+          {!treeRow && row?.up && <Empty text="The other panel is on its parent folder." />}
           {!treeRow && row?.isDir && !row.up && <ListingView listPath={row.path} source={source} />}
           {file && loading && <Empty text="Reading…" />}
           {file && error && <Empty text={error} />}
-          {file && !loading && preview && <Body preview={preview} source={source} theme={theme} tableOn={tableOn} onTrim={setTrimming} onSaved={() => setTick((value) => value + 1)} />}
+          {file && !loading && preview && <Body preview={preview} source={source} theme={theme} tableOn={tableOn} pageOn={pageOn} pageText={pageText} htmlText={htmlText} onTrim={setTrimming} onSaved={() => setTick((value) => value + 1)} />}
         </div>
         {file && !trimming && (
           <>
             <button type="button" className="fp-step" data-side="prev" aria-label="Previous file" disabled={neighbors.prev < 0} onClick={() => stepFile(neighbors.prev)}><ChevronLeft /></button>
             <button type="button" className="fp-step" data-side="next" aria-label="Next file" disabled={neighbors.next < 0} onClick={() => stepFile(neighbors.next)}><ChevronRight /></button>
-            {beside && pictureTools && <div className="fp-rail">{pictureTools}</div>}
+            {beside && pictureTools && <ToolRail>{pictureTools}</ToolRail>}
             {sourcePanel.view !== "tree" && (
               <button type="button" className="fp-pick" data-on={marked ? "true" : undefined} data-tip={marked ? "Selected" : "Select file"} aria-pressed={marked} onClick={() => toggleMark(source, sourcePanel.cursor, false)}>
                 {marked ? <SquareCheck /> : <Square />}
@@ -205,7 +239,7 @@ function PreviewActions({ path, extension }: { path: string; extension: string }
 
 function mediaKind(extension: string): "image" | "video" | "" {
   const ext = extension.toLowerCase();
-  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "heic", "heif"].includes(ext)) return "image";
+  if (["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "tif", "tiff", "ico", "svg", "heic", "heif"].includes(ext)) return "image";
   if (["mp4", "m4v", "webm", "ogv", "mov", "mkv"].includes(ext)) return "video";
   return "";
 }
@@ -214,19 +248,28 @@ function Empty({ text }: { text: string }) {
   return <div className="flex h-full items-center justify-center px-6 text-center text-[var(--muted)]">{text}</div>;
 }
 
-function Body({ preview, source, theme, tableOn, onTrim, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; tableOn: boolean; onTrim: (active: boolean) => void; onSaved: () => void }) {
+function Body({ preview, source, theme, tableOn, pageOn, pageText, htmlText, onTrim, onSaved }: { preview: PreviewFile; source: Side; theme: ThemeMode; tableOn: boolean; pageOn: boolean; pageText: string; htmlText: { current: (() => string) | null }; onTrim: (active: boolean) => void; onSaved: () => void }) {
   if (preview.kind === "image" && preview.dataBase64) return <ImageView key={preview.path} preview={preview} source={source} onTrim={onTrim} onSaved={onSaved} />;
-  if (preview.kind === "video" && preview.extension !== "vob") return <VideoView key={preview.path} preview={preview} source={source} />;
+  if (preview.kind === "video" && preview.extension !== "vob") return <VideoView key={preview.path} preview={preview} source={source} onTrim={onTrim} />;
   if (preview.kind === "audio" || preview.kind === "video") return <MediaView preview={preview} />;
   if (preview.kind === "zip") return <ZipView path={preview.path} source={source} />;
   if (preview.kind === "gz") return <GzView path={preview.path} source={source} />;
   if (preview.kind === "slides" && preview.text !== null) return <SlideView key={preview.path} path={preview.path} text={preview.text} />;
   if (preview.kind === "document" && preview.text !== null) return <DocumentView text={preview.text} />;
   if (preview.kind === "text" && preview.text !== null) {
-    return <CodeView text={preview.text} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
+    const html = preview.extension === "html" || preview.extension === "htm";
+    if (!html) return <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
+    return (
+      <div className="relative h-full min-h-0">
+        <div className={pageOn ? "invisible absolute inset-0" : "h-full min-h-0"} aria-hidden={pageOn}>
+          <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} liveRef={htmlText} />
+        </div>
+        {pageOn && <HtmlView text={pageText || preview.text} path={preview.path} truncated={preview.truncated} />}
+      </div>
+    );
   }
   if (preview.kind === "csv" && preview.text !== null) {
-    if (!tableOn) return <CodeView text={preview.text} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
+    if (!tableOn) return <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
     return <CsvTable text={preview.text} delimiter={preview.extension === "tsv" ? "\t" : ","} truncated={preview.truncated} />;
   }
   if (preview.kind === "pdf" && (preview.dataBase64 || !isPackedPath(preview.path))) return <PdfView data={preview.dataBase64} path={preview.path} />;
@@ -266,10 +309,62 @@ function clampOrigin(ox: number, oy: number, viewW: number, viewH: number, imgW:
 
 type TrimEdge = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
 
+type Tone = "color" | "bw" | "sepia";
+type BlurShape = "square" | "oval";
+type BlurFill = "blur" | "black";
+type BlurSpot = { id: number; shape: BlurShape; fill: BlurFill; x: number; y: number; w: number; h: number };
+
+const BLUR_MIN = 2;
+const BLUR_MAX = 48;
+const BLUR_DEFAULT = 16;
+
+function nextTone(tone: Tone): Tone {
+  if (tone === "color") return "bw";
+  if (tone === "bw") return "sepia";
+  return "color";
+}
+
+function toneTip(tone: Tone): string {
+  if (tone === "color") return "Black and white";
+  if (tone === "bw") return "Sepia";
+  return "Color";
+}
+
+function toneFilter(tone: Tone): string | undefined {
+  if (tone === "bw") return "grayscale(1)";
+  if (tone === "sepia") return "sepia(1)";
+  return undefined;
+}
+
+function formatLabel(format: string): string {
+  if (format === "jpg") return "JPG";
+  if (format === "png") return "PNG";
+  if (format === "webp") return "WebP";
+  if (format === "bmp") return "BMP";
+  if (format === "avif") return "AVIF";
+  return "GIF";
+}
+
+function blurMask(spots: BlurSpot[], width: number, height: number, feather: number): string {
+  const soft = Math.max(1, feather).toFixed(1);
+  const shapes = spots.map((spot) => {
+    if (spot.shape === "oval") {
+      const cx = (spot.x + spot.w / 2).toFixed(2);
+      const cy = (spot.y + spot.h / 2).toFixed(2);
+      const rx = (spot.w / 2).toFixed(2);
+      const ry = (spot.h / 2).toFixed(2);
+      return `<ellipse cx='${cx}' cy='${cy}' rx='${rx}' ry='${ry}' fill='white'/>`;
+    }
+    return `<rect x='${spot.x.toFixed(2)}' y='${spot.y.toFixed(2)}' width='${spot.w.toFixed(2)}' height='${spot.h.toFixed(2)}' fill='white'/>`;
+  }).join("");
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${width} ${height}' preserveAspectRatio='none'><defs><filter id='s' x='-50%' y='-50%' width='200%' height='200%'><feGaussianBlur stdDeviation='${soft}'/></filter></defs><g filter='url(#s)'>${shapes}</g></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
 function stillFormat(extension: string): string {
   const ext = extension.toLowerCase();
   if (ext === "jpg" || ext === "jpeg") return "jpg";
-  if (ext === "png" || ext === "webp" || ext === "bmp" || ext === "gif") return ext;
+  if (ext === "png" || ext === "webp" || ext === "bmp" || ext === "gif" || ext === "avif") return ext;
   return "jpg";
 }
 
@@ -279,11 +374,13 @@ function PictureActions({
   svg,
   zipped,
   canEdit,
+  tone,
   tool,
   onRotateLeft,
   onRotateRight,
   onMirror,
   onFlip,
+  onTone,
   onSave,
   onTool,
 }: {
@@ -292,13 +389,15 @@ function PictureActions({
   svg: boolean;
   zipped: boolean;
   canEdit: boolean;
-  tool: "" | "convert" | "trim";
+  tone: Tone;
+  tool: "" | "convert" | "trim" | "blur";
   onRotateLeft: () => void;
   onRotateRight: () => void;
   onMirror: () => void;
   onFlip: () => void;
+  onTone: () => void;
   onSave: () => void;
-  onTool: (next: "convert" | "trim") => void;
+  onTool: (next: "convert" | "trim" | "blur") => void;
 }) {
   const blocked = svg ? "SVG pictures stay as they are." : zipped ? "Copy the picture out of the archive before saving a change." : "";
   return (
@@ -308,16 +407,245 @@ function PictureActions({
       <button className="tb-btn" data-tip="Mirror" onClick={onMirror}><FlipHorizontal /></button>
       <button className="tb-btn" data-tip="Flip" onClick={onFlip}><FlipVertical /></button>
       <button className="tb-btn" data-active={tool === "trim"} disabled={!canEdit} data-tip={blocked || (canEdit ? "Trim" : "Can't read this picture's size.")} onClick={() => onTool("trim")}><Crop /></button>
+      <button className="tb-btn" data-tone={tone === "color" ? undefined : tone} disabled={!canEdit} data-tip={blocked || (canEdit ? toneTip(tone) : "Can't read this picture's size.")} onClick={onTone}><Contrast /></button>
+      <button className="tb-btn" data-active={tool === "blur"} disabled={!canEdit} data-tip={blocked || (canEdit ? "Blur" : "Can't read this picture's size.")} onClick={() => onTool("blur")}><Blend /></button>
       <button className="tb-btn" data-active={tool === "convert"} disabled={!canEdit} data-tip={blocked || (canEdit ? "Convert" : "Can't read this picture's size.")} onClick={() => onTool("convert")}><Replace /></button>
       <button
         className="tb-btn"
         disabled={!dirty || saving || svg || zipped}
         data-tip={blocked || (saving ? "Saving…" : "Save the picture")}
-        style={dirty && !saving && !svg && !zipped ? { color: "var(--accent)" } : undefined}
+        style={saving || (dirty && !svg && !zipped) ? { color: "var(--accent)" } : undefined}
         onClick={onSave}
       >
-        <Save />
+        {saving ? <span className="fp-spin" /> : <Save />}
       </button>
+    </>
+  );
+}
+
+function BlurMarks({
+  spots,
+  boxW,
+  boxH,
+  orientedW,
+  orientedH,
+  tone,
+  turned,
+  flipH,
+  flipV,
+  quarters,
+  src,
+  strength,
+  interactive,
+  onRemove,
+}: {
+  spots: BlurSpot[];
+  boxW: number;
+  boxH: number;
+  orientedW: number;
+  orientedH: number;
+  tone: Tone;
+  turned: boolean;
+  flipH: boolean;
+  flipV: boolean;
+  quarters: number;
+  src: string;
+  strength: number;
+  interactive: boolean;
+  onRemove: (id: number) => void;
+}) {
+  if (!boxW || !boxH || !orientedW || !orientedH || spots.length === 0) return null;
+  const veils = spots.filter((spot) => spot.fill !== "black");
+  const feather = Math.max(1, strength * 0.25);
+  const mask = veils.length > 0 ? blurMask(veils, orientedW, orientedH, feather) : "";
+  const blurPx = Math.max(1, (strength * boxW) / orientedW);
+  const toneCss = toneFilter(tone);
+  const filter = toneCss ? `${toneCss} blur(${blurPx}px)` : `blur(${blurPx}px)`;
+  const sx = boxW / orientedW;
+  const sy = boxH / orientedH;
+  const remove = (id: number) => (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onRemove(id);
+  };
+  return (
+    <>
+      {veils.length > 0 && (
+        <div className="fp-blur-layer" style={{ maskImage: mask, WebkitMaskImage: mask, maskRepeat: "no-repeat", WebkitMaskRepeat: "no-repeat", maskSize: "100% 100%", WebkitMaskSize: "100% 100%" }}>
+          <img
+            alt=""
+            draggable={false}
+            src={src}
+            style={{
+              width: turned ? boxH : boxW,
+              height: turned ? boxW : boxH,
+              filter,
+              transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
+            }}
+          />
+        </div>
+      )}
+      {spots.filter((spot) => spot.fill === "black" || interactive).map((spot) => (
+        <div
+          key={spot.id}
+          className={spot.fill === "black" ? "fp-censor" : "fp-blur-hit"}
+          data-shape={spot.shape}
+          data-draft={spot.id < 0 ? "true" : undefined}
+          style={{ left: spot.x * sx, top: spot.y * sy, width: Math.max(1, spot.w * sx), height: Math.max(1, spot.h * sy) }}
+          onPointerDown={interactive && spot.id >= 0 ? remove(spot.id) : undefined}
+        />
+      ))}
+    </>
+  );
+}
+
+function ToolRail({ children }: { children: ReactNode }) {
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [tip, setTip] = useState<{ text: string; x: number; y: number; w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    const node = tipRef.current;
+    if (!node || !tip) return;
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
+    let left = tip.x - width - 8;
+    let top = tip.y + tip.h / 2 - height / 2;
+    if (left < 8) left = Math.min(window.innerWidth - width - 8, tip.x + tip.w + 8);
+    top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+    node.style.left = `${left}px`;
+    node.style.top = `${top}px`;
+    node.dataset.ready = "true";
+  }, [tip]);
+  return (
+    <div
+      className="fp-rail"
+      onMouseOver={(event) => {
+        const target = (event.target as Element | null)?.closest?.("[data-tip]");
+        if (!target || !event.currentTarget.contains(target)) return;
+        const text = target.getAttribute("data-tip");
+        if (!text || target.getAttribute("data-active") === "true") {
+          setTip(null);
+          return;
+        }
+        const box = target.getBoundingClientRect();
+        setTip((current) => current && current.text === text && current.x === box.left && current.y === box.top ? current : { text, x: box.left, y: box.top, w: box.width, h: box.height });
+      }}
+      onMouseLeave={() => setTip(null)}
+    >
+      {children}
+      {tip && createPortal(<div ref={tipRef} className="fp-rail-tip">{tip.text}</div>, document.body)}
+    </div>
+  );
+}
+
+type CastScreen = { id: string; name: string; audio: boolean; video: boolean };
+
+function CastButton({ path, kind, disabled, onStart, onStop }: { path: string; kind: "audio" | "video"; disabled: boolean; onStart: () => void; onStop: () => void }) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [box, setBox] = useState<{ top: number; right: number } | null>(null);
+  const [screens, setScreens] = useState<CastScreen[] | null>(null);
+  const [looking, setLooking] = useState(false);
+  const [casting, setCasting] = useState<string | null>(null);
+  useEffect(() => () => {
+    setCastActive(false);
+    void invoke("cast_stop").catch(() => {});
+  }, [path]);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const lookId = useRef(0);
+  const look = () => {
+    const id = lookId.current + 1;
+    lookId.current = id;
+    setLooking(true);
+    setScreens(null);
+    void invoke<CastScreen[]>("cast_screens")
+      .then((list) => {
+        if (lookId.current === id) setScreens(list);
+      })
+      .catch((reason: unknown) => {
+        if (lookId.current !== id) return;
+        toast("error", message(reason));
+        setScreens([]);
+      })
+      .finally(() => {
+        if (lookId.current === id) setLooking(false);
+      });
+  };
+  const playOn = (screen: CastScreen) => {
+    setOpen(false);
+    void invoke("cast_play", { path, screen: screen.id })
+      .then(() => {
+        setCasting(screen.name);
+        setCastActive(true);
+        onStart();
+        toast("success", `Playing on ${screen.name}. Pause and the bar control it.`);
+      })
+      .catch((reason: unknown) => toast("error", message(reason)));
+  };
+  const ready = screens ?? [];
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="tb-btn"
+        disabled={disabled}
+        data-active={casting ? "true" : undefined}
+        data-tip={disabled ? "This file has to be on this computer." : casting ? `Playing on ${casting}. Pause and the bar control it.` : "Cast to devices"}
+        onClick={() => {
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          const rect = buttonRef.current?.getBoundingClientRect();
+          if (rect) setBox({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
+          setOpen(true);
+          look();
+        }}
+      >
+        <Cast />
+      </button>
+      {open && box && createPortal(
+        <div className="menu" style={{ position: "fixed", top: box.top, right: box.right, left: "auto", zIndex: 80 }} onMouseDown={(event) => event.stopPropagation()}>
+          {casting && (
+            <MenuItem label={`Stop on ${casting}`} onClick={() => {
+              setOpen(false);
+              void invoke("cast_stop")
+                .then(() => {
+                  setCasting(null);
+                  setCastActive(false);
+                  onStop();
+                  toast("success", "Stopped.");
+                })
+                .catch((reason: unknown) => toast("error", message(reason)));
+            }} />
+          )}
+          {looking && <MenuItem label="Looking for devices…" disabled onClick={() => {}} />}
+          {ready.map((screen) => {
+            const canPlay = kind === "audio" ? screen.audio : screen.video;
+            return (
+              <MenuItem key={screen.id} icon={<Cast />} label={screen.name} hint={canPlay ? undefined : "Audio"} disabled={!canPlay} onClick={() => { if (canPlay) playOn(screen); }} />
+            );
+          })}
+          {screens && ready.length === 0 && !looking && <MenuItem label="No devices on this network" disabled onClick={() => {}} />}
+        </div>,
+        document.body,
+      )}
     </>
   );
 }
@@ -335,8 +663,15 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
   const [quarters, setQuarters] = useState(0);
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
+  const [tone, setTone] = useState<Tone>("color");
+  const [spots, setSpots] = useState<BlurSpot[]>([]);
+  const [draft, setDraft] = useState<BlurSpot | null>(null);
+  const [blurShape, setBlurShape] = useState<BlurShape>("square");
+  const [blurFill, setBlurFill] = useState<BlurFill>("blur");
+  const [blurStrength, setBlurStrength] = useState(BLUR_DEFAULT);
   const [saving, setSaving] = useState(false);
-  const [tool, setTool] = useState<"" | "convert" | "trim">("");
+  const [tool, setTool] = useState<"" | "convert" | "trim" | "blur">("");
+  const [ratio, setRatio] = useState<VideoPreset>("original");
   const [widthText, setWidthText] = useState("");
   const [heightText, setHeightText] = useState("");
   const [outW, setOutW] = useState(0);
@@ -361,34 +696,50 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
   const cropRef = useRef<HTMLDivElement>(null);
   const seeded = useRef(false);
   const focused = useRef(false);
-  const dirty = quarters !== 0 || flipH || flipV;
+  const blurIds = useRef(0);
+  const dirty = quarters !== 0 || flipH || flipV || tone !== "color" || spots.length > 0;
+  const marks = draft && draft.w > 0 && draft.h > 0 ? [...spots, draft] : spots;
+  const pictureEdits = {
+    quarters,
+    flipH,
+    flipV,
+    tone,
+    spots: spots.map(({ shape, fill, x, y, w, h }) => ({ shape, mode: fill, x, y, w, h })),
+    strength: blurStrength,
+  };
   const svg = preview.extension === "svg";
   const zipped = isPackedPath(preview.path);
   const mime = preview.mime || imageMime[preview.extension] || "image/jpeg";
   const turned = quarters % 2 === 1;
   const pixelW = pixels.w || preview.width;
   const pixelH = pixels.h || preview.height;
-  const orientedW = turned ? pixelH : pixelW;
-  const orientedH = turned ? pixelW : pixelH;
+  const fullW = preview.scaled && preview.width > 0 ? preview.width : pixelW;
+  const fullH = preview.scaled && preview.height > 0 ? preview.height : pixelH;
+  const orientedW = turned ? fullH : fullW;
+  const orientedH = turned ? fullW : fullH;
   const canEdit = !svg && !zipped && orientedW > 0 && orientedH > 0;
   const { beside, setTools } = useContext(PreviewChromeContext);
   const saveTurn = () => {
+    const job = jobStart("Saving picture…");
     setSaving(true);
-    void invoke("save_image", { path: preview.path, quarters, flipH, flipV })
-      .then(() => {
-        toast("success", "Picture saved.");
+    void invoke<string>("save_image", { path: preview.path, ...pictureEdits })
+      .then((saved) => {
+        jobFinish(job, "success", `Saved ${baseName(saved)}.`);
         setQuarters(0);
         setFlipH(false);
         setFlipV(false);
+        setTone("color");
+        setSpots([]);
+        setDraft(null);
         onSaved();
       })
-      .catch((reason: unknown) => toast("error", message(reason)))
+      .catch((reason: unknown) => jobFinish(job, "error", message(reason)))
       .finally(() => setSaving(false));
   };
   const saveTurnRef = useRef(saveTurn);
   saveTurnRef.current = saveTurn;
   useLayoutEffect(() => {
-    if (!beside || tool === "trim") {
+    if (!beside || tool === "trim" || tool === "blur") {
       setTools(null);
       return () => setTools(null);
     }
@@ -400,18 +751,20 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
           svg={svg}
           zipped={zipped}
           canEdit={canEdit}
+          tone={tone}
           tool={tool}
           onRotateLeft={() => setQuarters((value) => (value + 3) % 4)}
           onRotateRight={() => setQuarters((value) => (value + 1) % 4)}
           onMirror={() => setFlipH((value) => !value)}
           onFlip={() => setFlipV((value) => !value)}
+          onTone={() => setTone(nextTone)}
           onSave={() => saveTurnRef.current()}
           onTool={(next) => setTool((value) => (value === next ? "" : next))}
         />
       </div>,
     );
     return () => setTools(null);
-  }, [beside, canEdit, dirty, saving, setTools, svg, tool, zipped]);
+  }, [beside, canEdit, dirty, saving, setTools, svg, tone, tool, zipped]);
   const viewW = outW > 0 && scale > 0 ? outW / scale : 0;
   const viewH = outH > 0 && scale > 0 ? outH / scale : 0;
   const zoom = Math.round(scale * 100);
@@ -439,7 +792,11 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
   if (seenPicture !== preview.dataBase64) {
     setSeenPicture(preview.dataBase64);
     setTool("");
+    setRatio("original");
     setApplied(false);
+    setTone("color");
+    setSpots([]);
+    setDraft(null);
   }
 
   useEffect(() => {
@@ -556,6 +913,52 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
     return () => node.removeEventListener("wheel", onWheel);
   }, [tool, orientedW, orientedH]);
 
+  const ratioRef = useRef(ratio);
+  ratioRef.current = ratio;
+
+  const applyFrame = (width: number, height: number) => {
+    const w = Math.min(Math.max(Math.round(width), 1), 16000);
+    const h = Math.min(Math.max(Math.round(height), 1), 16000);
+    const min = Math.min(1, w / orientedW, h / orientedH);
+    const nextScale = Math.min(8, Math.max(min, scale));
+    const nextViewW = w / nextScale;
+    const nextViewH = h / nextScale;
+    const nextOrigin = clampOrigin(originX + viewW / 2 - nextViewW / 2, originY + viewH / 2 - nextViewH / 2, nextViewW, nextViewH, orientedW, orientedH);
+    setOutW(w);
+    setOutH(h);
+    setScale(nextScale);
+    setOriginX(nextOrigin.x);
+    setOriginY(nextOrigin.y);
+    setWidthText(String(w));
+    setHeightText(String(h));
+    setNotice(width > 16000 || height > 16000 ? "That trim is too large, so it was reduced." : "");
+  };
+
+  const fitRatio = (next: VideoPreset) => {
+    setRatio(next);
+    if (next === "original" || orientedW < 1 || orientedH < 1) return;
+    const target = presetRatio[next];
+    let w = orientedW;
+    let h = w / target;
+    if (h > orientedH) {
+      h = orientedH;
+      w = h * target;
+    }
+    const cx = originX + (viewW || orientedW) / 2;
+    const cy = originY + (viewH || orientedH) / 2;
+    const nextW = Math.max(1, Math.round(w));
+    const nextH = Math.max(1, Math.round(h));
+    const nextOrigin = clampOrigin(cx - nextW / 2, cy - nextH / 2, nextW, nextH, orientedW, orientedH);
+    setScale(1);
+    setOutW(nextW);
+    setOutH(nextH);
+    setWidthText(String(nextW));
+    setHeightText(String(nextH));
+    setOriginX(nextOrigin.x);
+    setOriginY(nextOrigin.y);
+    setNotice("");
+  };
+
   const applySize = (axis: "x" | "y", next: number) => {
     const capped = Math.min(Math.max(Math.round(next), 1), 16000);
     const width = axis === "x" ? capped : outW || orientedW;
@@ -582,6 +985,12 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
     else setHeightText(raw);
     const n = Math.round(Number(raw));
     if (!Number.isFinite(n) || n <= 0) return;
+    if (ratio !== "original") {
+      const target = presetRatio[ratio];
+      if (axis === "x") applyFrame(n, Math.max(1, Math.round(n / target)));
+      else applyFrame(Math.max(1, Math.round(n * target)), n);
+      return;
+    }
     applySize(axis, n);
   };
 
@@ -669,6 +1078,7 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
       return;
     }
     if (!full) setApplied(true);
+    const job = jobStart("Saving picture…");
     setSavingTrim(true);
     void invoke<string>("trim_image", {
       path: preview.path,
@@ -681,18 +1091,16 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
       viewHeight: full ? orientedH : viewH,
       outWidth: width,
       outHeight: height,
-      quarters,
-      flipH,
-      flipV,
+      ...pictureEdits,
     })
       .then((saved) => {
-        toast("success", `Saved ${baseName(saved)}.`);
+        jobFinish(job, "success", `Saved ${baseName(saved)}.`);
         void useApp.getState().refresh(source);
         if (!full) onSaved();
       })
       .catch((reason: unknown) => {
         if (!full) setApplied(false);
-        toast("error", message(reason));
+        jobFinish(job, "error", message(reason));
       })
       .finally(() => setSavingTrim(false));
   };
@@ -750,6 +1158,34 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
         if (south) nextViewH = limitH - top;
         else top = limitH - nextViewH;
       }
+      const locked = ratioRef.current;
+      if (locked !== "original") {
+        const target = presetRatio[locked];
+        const horizontal = east || west;
+        const vertical = north || south;
+        let w = nextViewW;
+        let h = nextViewH;
+        if (horizontal && (!vertical || Math.abs(dx) >= Math.abs(dy))) h = w / target;
+        else w = h * target;
+        if (w > limitW) {
+          w = limitW;
+          h = w / target;
+        }
+        if (h > limitH) {
+          h = limitH;
+          w = h * target;
+        }
+        w = Math.max(1, w);
+        h = Math.max(1, h);
+        let x = west ? start.originX + start.viewW - w : east ? start.originX : start.originX + (start.viewW - w) / 2;
+        let y = north ? start.originY + start.viewH - h : south ? start.originY : start.originY + (start.viewH - h) / 2;
+        x = Math.min(Math.max(0, x), Math.max(0, limitW - w));
+        y = Math.min(Math.max(0, y), Math.max(0, limitH - h));
+        nextViewW = w;
+        nextViewH = h;
+        left = x;
+        top = y;
+      }
       nextViewW = Math.min(Math.max(nextViewW, Math.min(minViewW, limitW)), limitW);
       nextViewH = Math.min(Math.max(nextViewH, Math.min(minViewH, limitH)), limitH);
       left = Math.min(Math.max(0, left), Math.max(0, limitW - nextViewW));
@@ -778,21 +1214,69 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
     target.addEventListener("pointerup", up);
   };
 
+  const markBlur = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!orientedW || !orientedH) return;
+    if ((event.target as Element).closest?.(".fp-blur-hit, .fp-censor")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    const locate = (clientX: number, clientY: number) => {
+      const box = target.getBoundingClientRect();
+      const x = box.width > 0 ? ((clientX - box.left) / box.width) * orientedW : 0;
+      const y = box.height > 0 ? ((clientY - box.top) / box.height) * orientedH : 0;
+      return { x: Math.min(orientedW, Math.max(0, x)), y: Math.min(orientedH, Math.max(0, y)) };
+    };
+    const start = locate(event.clientX, event.clientY);
+    const shape = blurShape;
+    const fill = blurFill;
+    target.setPointerCapture(event.pointerId);
+    const move = (ev: PointerEvent) => {
+      const next = locate(ev.clientX, ev.clientY);
+      setDraft({ id: -1, shape, fill, x: Math.min(start.x, next.x), y: Math.min(start.y, next.y), w: Math.abs(next.x - start.x), h: Math.abs(next.y - start.y) });
+    };
+    const up = (ev: PointerEvent) => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
+      const next = locate(ev.clientX, ev.clientY);
+      const x = Math.min(start.x, next.x);
+      const y = Math.min(start.y, next.y);
+      const w = Math.abs(next.x - start.x);
+      const h = Math.abs(next.y - start.y);
+      const box = target.getBoundingClientRect();
+      const screenW = orientedW > 0 ? (w / orientedW) * box.width : 0;
+      const screenH = orientedH > 0 ? (h / orientedH) * box.height : 0;
+      setDraft(null);
+      if (w >= 4 && h >= 4 && screenW >= 6 && screenH >= 6) {
+        blurIds.current += 1;
+        const id = blurIds.current;
+        setSpots((list) => [...list, { id, shape, fill, x, y, w, h }]);
+      }
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  };
+
+  const shotSrc = `data:${mime};base64,${preview.dataBase64}`;
+  const removeSpot = (id: number) => setSpots((list) => list.filter((spot) => spot.id !== id));
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="fp-tools">
-        {(!beside || tool === "trim") && (
+        {(!beside || tool === "trim" || tool === "blur") && (
           <PictureActions
             dirty={dirty}
             saving={saving}
             svg={svg}
             zipped={zipped}
             canEdit={canEdit}
+            tone={tone}
             tool={tool}
             onRotateLeft={() => setQuarters((value) => (value + 3) % 4)}
             onRotateRight={() => setQuarters((value) => (value + 1) % 4)}
             onMirror={() => setFlipH((value) => !value)}
             onFlip={() => setFlipV((value) => !value)}
+            onTone={() => setTone(nextTone)}
             onSave={saveTurn}
             onTool={(next) => setTool((value) => (value === next ? "" : next))}
           />
@@ -818,14 +1302,49 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
               {Math.round(viewZoom * 100)}%
             </label>
           )}
-          {preview.scaled && <span className="text-xs text-[var(--muted)]">Shown smaller. Save writes the full picture.</span>}
+          {preview.scaled && <span className="text-xs text-[var(--muted)]">Shown smaller. The copy uses the full picture.</span>}
           <ToolsPlaceButton />
         </div>
       </div>
-      {tool && canEdit && (
+      {tool === "blur" && canEdit && (
+        <div className="fp-trim">
+          <span className="seg">
+            <button type="button" data-active={blurShape === "square"} data-tip="Square" aria-label="Square" onClick={() => setBlurShape("square")}><Square /></button>
+            <button type="button" data-active={blurShape === "oval"} data-tip="Oval" aria-label="Oval" onClick={() => setBlurShape("oval")}><Circle /></button>
+          </span>
+          <span className="seg">
+            <button type="button" data-active={blurFill === "blur"} data-tip="Blur" aria-label="Blur" onClick={() => setBlurFill("blur")}><Blend /></button>
+            <button type="button" data-active={blurFill === "black"} data-tip="Black" aria-label="Black" onClick={() => setBlurFill("black")}><Square className="fp-solid" /></button>
+          </span>
+          <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
+            Strength
+            <input
+              className="fp-icon-size"
+              style={{ "--fp-icon-fill": `${((blurStrength - BLUR_MIN) / (BLUR_MAX - BLUR_MIN)) * 100}%` } as CSSProperties}
+              type="range"
+              min={BLUR_MIN}
+              max={BLUR_MAX}
+              value={blurStrength}
+              aria-label="Blur strength"
+              onChange={(event) => setBlurStrength(Number(event.target.value))}
+            />
+            {blurStrength}
+          </label>
+          <span className="text-xs text-[var(--muted)]">Drag on the picture. Click a spot to remove it.</span>
+          {spots.length > 0 && <button type="button" className="btn sm" onClick={() => setSpots([])}>Clear</button>}
+        </div>
+      )}
+      {tool && tool !== "blur" && canEdit && (
         <div className="fp-trim">
           {tool === "trim" && (
             <>
+              <span className="seg" role="group" aria-label="Frame">
+                {frameChoices.map((frame) => (
+                  <button key={frame.id} type="button" data-active={ratio === frame.id} data-tip={frame.tip} aria-label={frame.tip} onClick={() => fitRatio(frame.id)}>
+                    <FrameMark wide={frame.wide} tall={frame.tall} free={frame.free} />
+                  </button>
+                ))}
+              </span>
               <label className="text-xs text-[var(--muted)]">
                 Width
                 <input className="field sm ml-1" inputMode="numeric" value={widthText} onChange={(event) => typeSize("x", event.target.value)} />
@@ -842,30 +1361,33 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
             menuClass="fp-format-menu"
             button={({ open, toggle }) => (
               <button type="button" className="field sm fp-format" data-active={open} aria-label="Format" onClick={toggle}>
-                {format === "jpg" ? "JPG" : format === "png" ? "PNG" : format === "webp" ? "WebP" : format === "bmp" ? "BMP" : "GIF"}
+                {formatLabel(format)}
               </button>
             )}
           >
             {(close) => (
               <>
-                {([["jpg", "JPG"], ["png", "PNG"], ["webp", "WebP"], ["bmp", "BMP"], ["gif", "GIF"]] as const).map(([value, label]) => (
+                {([["jpg", "JPG"], ["png", "PNG"], ["webp", "WebP"], ["avif", "AVIF"], ["bmp", "BMP"], ["gif", "GIF"]] as const).map(([value, label]) => (
                   <MenuItem key={value} label={label} hint={format === value ? "✓" : undefined} onClick={() => { setFormat(value); close(); }} />
                 ))}
               </>
             )}
           </Dropdown>
-          {format === "jpg" && (
+          {(format === "jpg" || format === "avif") && (
             <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
               Quality
               <input type="range" min={1} max={100} value={quality} onChange={(event) => setQuality(Number(event.target.value))} />
               {quality}
             </label>
           )}
-          {(format === "jpg" || format === "bmp") && ["png", "webp", "gif", "svg", "ico"].includes(preview.extension) && (
-            <span className="seg" data-tip="JPG and BMP can't keep see-through parts. Pick the color that fills them.">
-              <button type="button" data-active={background === "white"} onClick={() => setBackground("white")}>White</button>
-              <button type="button" data-active={background === "black"} onClick={() => setBackground("black")}>Black</button>
-            </span>
+          {(format === "jpg" || format === "bmp") && ["png", "webp", "avif", "gif", "svg", "ico"].includes(preview.extension) && (
+            <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
+              Transparent parts
+              <span className="seg" role="group" aria-label="Color for transparent parts">
+                <button type="button" data-active={background === "white"} data-tip="See-through parts become white" onClick={() => setBackground("white")}>White</button>
+                <button type="button" data-active={background === "black"} data-tip="See-through parts become black" onClick={() => setBackground("black")}>Black</button>
+              </span>
+            </label>
           )}
           <button
             className="btn sm primary"
@@ -874,7 +1396,8 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
             disabled={savingTrim || (tool === "trim" && (!(Number(widthText) > 0) || !(Number(heightText) > 0) || outW < 1 || outH < 1))}
             onClick={() => saveExport(tool === "convert")}
           >
-            Save
+            {savingTrim && <span className="fp-spin" />}
+            {savingTrim ? "Saving…" : "Save"}
           </button>
           {notice && <span className="text-xs text-[var(--muted)]">{notice}</span>}
           {tool === "trim" && <span className="text-xs text-[var(--muted)]">Enter keeps the trim. Drag the box to move it. Drag an edge to resize. Ctrl + scroll zooms.</span>}
@@ -890,13 +1413,15 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
               <div className="fp-photo" style={{ left: image.x, top: image.y, width: image.w, height: image.h, background: format === "jpg" || format === "bmp" ? (background === "black" ? "#000" : "#fff") : "transparent", clipPath: applied ? `inset(${cut.y}px ${Math.max(0, image.w - cut.x - cut.w)}px ${Math.max(0, image.h - cut.y - cut.h)}px ${cut.x}px)` : undefined }}>
                 <img
                   alt={preview.name}
-                  src={`data:${mime};base64,${preview.dataBase64}`}
+                  src={shotSrc}
                   style={{
                     width: turned ? image.h : image.w,
                     height: turned ? image.w : image.h,
+                    filter: toneFilter(tone),
                     transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
                   }}
                 />
+                <BlurMarks spots={marks} boxW={image.w} boxH={image.h} orientedW={orientedW} orientedH={orientedH} tone={tone} turned={turned} flipH={flipH} flipV={flipV} quarters={quarters} src={shotSrc} strength={blurStrength} interactive={false} onRemove={removeSpot} />
                 {!applied && <div className="fp-shade" style={{ left: 0, top: 0, width: "100%", height: cut.y }} />}
                 {!applied && <div className="fp-shade" style={{ left: 0, top: cut.y, width: cut.x, height: cut.h }} />}
                 {!applied && <div className="fp-shade" style={{ left: cut.x + cut.w, top: cut.y, right: 0, height: cut.h }} />}
@@ -929,9 +1454,14 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
           ) : (
             <div
               className="fp-shot"
-              data-pan={viewZoom > 1 ? "true" : undefined}
-              style={{ width: displayW, height: displayH }}
+              data-pan={tool !== "blur" && viewZoom > 1 ? "true" : undefined}
+              data-blur={tool === "blur" ? "true" : undefined}
+              style={{ width: displayW, height: displayH, background: (format === "jpg" || format === "bmp") && ["png", "webp", "avif", "gif", "svg", "ico"].includes(preview.extension) ? (background === "black" ? "#000" : "#fff") : undefined }}
               onPointerDown={(event) => {
+                if (tool === "blur") {
+                  markBlur(event);
+                  return;
+                }
                 if (viewZoom <= 1) return;
                 const scroller = stageRef.current;
                 if (!scroller) return;
@@ -957,7 +1487,7 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
             >
               <img
                 alt={preview.name}
-                src={`data:${mime};base64,${preview.dataBase64}`}
+                src={shotSrc}
                 onLoad={(event) => {
                   const width = event.currentTarget.naturalWidth;
                   const height = event.currentTarget.naturalHeight;
@@ -966,9 +1496,11 @@ function ImageView({ preview, source, onTrim, onSaved }: { preview: PreviewFile;
                 style={{
                   width: turned ? displayH : displayW,
                   height: turned ? displayW : displayH,
+                  filter: toneFilter(tone),
                   transform: `translate(-50%, -50%) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${quarters * 90}deg)`,
                 }}
               />
+              <BlurMarks spots={marks} boxW={displayW} boxH={displayH} orientedW={orientedW} orientedH={orientedH} tone={tone} turned={turned} flipH={flipH} flipV={flipV} quarters={quarters} src={shotSrc} strength={blurStrength} interactive={tool === "blur"} onRemove={removeSpot} />
             </div>
           )}
         </div>
@@ -1174,20 +1706,24 @@ function VideoActions({
   canSave,
   ready,
   saveTip,
+  trimming,
   onRotateLeft,
   onRotateRight,
   onMirror,
   onFlip,
+  onTrim,
   onSave,
 }: {
   saving: boolean;
   canSave: boolean;
   ready: boolean;
   saveTip: string;
+  trimming: boolean;
   onRotateLeft: () => void;
   onRotateRight: () => void;
   onMirror: () => void;
   onFlip: () => void;
+  onTrim: () => void;
   onSave: () => void;
 }) {
   return (
@@ -1196,6 +1732,7 @@ function VideoActions({
       <button className="tb-btn" disabled={saving} data-tip="Rotate right" onClick={onRotateRight}><RotateCw /></button>
       <button className="tb-btn" disabled={saving} data-tip="Mirror" onClick={onMirror}><FlipHorizontal /></button>
       <button className="tb-btn" disabled={saving} data-tip="Flip" onClick={onFlip}><FlipVertical /></button>
+      <button className="tb-btn" disabled={saving} data-active={trimming} data-tip="Trim" onClick={onTrim}><Crop /></button>
       <button className="tb-btn" disabled={!canSave} data-tip={saveTip} style={ready ? { color: "var(--accent)" } : undefined} onClick={onSave}>
         <Save />
       </button>
@@ -1204,7 +1741,7 @@ function VideoActions({
   );
 }
 
-function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) {
+function VideoView({ preview, source, onTrim }: { preview: PreviewFile; source: Side; onTrim: (active: boolean) => void }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [info, setInfo] = useState<VideoInfo | null>(null);
@@ -1234,8 +1771,11 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
   const [soundOpen, setSoundOpen] = useState(false);
   const [draftPath, setDraftPath] = useState("");
   const [mute, setMute] = useState(false);
+  const [trimming, setTrimming] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const [saving, setSaving] = useState(false);
   const [progress, setProgress] = useState(0);
+  const saveJob = useRef<string | null>(null);
   const [frame, setFrame] = useState({ w: 0, h: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1255,6 +1795,7 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
   const hearRef = useRef<(t: number, force: boolean) => void>(() => {});
   const [playMs, setPlayMs] = useState(0);
   const playRef = useRef(0);
+  const castOn = useRef(false);
   const thumbVideo = useRef<HTMLVideoElement>(null);
   const thumbTimer = useRef(0);
   const [thumb, setThumb] = useState<{ left: number; top: number; ms: number } | null>(null);
@@ -1342,17 +1883,27 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
     const video = videoRef.current;
     if (!video || !info) return;
     const t = video.currentTime * 1000;
-    video.muted = mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
+    video.muted = castOn.current || mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
     video.volume = soundVol / 100;
     syncExtra(video);
   }, [extraEnd, extraPlace, extraStart, extraVol, info, mute, soundEnd, soundStart, soundVol, url]);
+
+  useEffect(() => watchCast((on) => {
+    castOn.current = on;
+    const video = videoRef.current;
+    if (!video) return;
+    const t = video.currentTime * 1000;
+    video.muted = on || mute || !info?.hasAudio || t < soundStart - 40 || t >= soundEnd;
+  }), [info, mute, soundEnd, soundStart]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancel = false;
     void import("@tauri-apps/api/event").then(async ({ listen }) => {
       const stop = await listen<{ path: string; ratio: number }>("video-edit", (event) => {
-        if (event.payload.path === preview.path) setProgress(event.payload.ratio);
+        if (event.payload.path !== preview.path) return;
+        setProgress(event.payload.ratio);
+        if (saveJob.current) jobUpdate(saveJob.current, event.payload.ratio, "Saving video…");
       });
       if (cancel) stop();
       else unlisten = stop;
@@ -1816,6 +2367,8 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
       return;
     }
     if (!dirty || saving) return;
+    const job = jobStart("Saving video…");
+    saveJob.current = job;
     setSaving(true);
     setProgress(0);
     void invoke<string>("edit_video", {
@@ -1839,14 +2392,17 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
       extraVolume: extraVol / 100,
     })
       .then((saved) => {
-        toast("success", `Saved ${baseName(saved)}.`);
+        jobFinish(job, "success", `Saved ${baseName(saved)}.`);
         void useApp.getState().refresh(source);
       })
       .catch((reason: unknown) => {
         const text = message(reason);
-        toast(text === "Save cancelled." ? "warning" : "error", text);
+        jobFinish(job, text === "Save cancelled." ? "warning" : "error", text);
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        if (saveJob.current === job) saveJob.current = null;
+        setSaving(false);
+      });
   };
 
   const percent = Math.round(progress * 100);
@@ -1871,10 +2427,16 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
     onRotateRight: () => setQuarters((value) => (value + 1) % 4),
     onMirror: () => setFlipH((value) => !value),
     onFlip: () => setFlipV((value) => !value),
+    onTrim: () => setTrimming((value) => !value),
     onSave: () => saveRef.current(),
+    trimming,
   };
+  useEffect(() => {
+    onTrim(trimming);
+    return () => onTrim(false);
+  }, [trimming, onTrim]);
   useLayoutEffect(() => {
-    if (!beside) {
+    if (!beside || trimming || playing) {
       setTools(null);
       return () => setTools(null);
     }
@@ -1884,37 +2446,45 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
       </div>,
     );
     return () => setTools(null);
-  }, [beside, blocked, canSave, dirty, mute, packed, ready, saveTip, saving, setTools]);
+  }, [beside, blocked, canSave, dirty, mute, packed, playing, ready, saveTip, saving, setTools, trimming]);
 
   return (
     <div className="fp-video">
       <div className="fp-tools">
-        {!beside && <VideoActions {...videoActionProps} />}
-        <div className="seg" role="group" aria-label="Frame">
-          {frameChoices.map((frame) => (
-            <button
-              key={frame.id}
-              type="button"
-              disabled={saving}
-              data-active={preset === frame.id}
-              data-tip={frame.tip}
-              aria-label={frame.tip}
-              onClick={() => {
-                setPreset(frame.id);
-                setCropX(0.5);
-                setCropY(0.5);
-              }}
-            >
-              <FrameMark wide={frame.wide} tall={frame.tall} free={frame.free} />
-            </button>
-          ))}
-        </div>
-        {saving && <span className="text-xs text-[var(--muted)]">{percent}%</span>}
-        {blocked && <span className="text-xs text-[var(--muted)]">{blocked}</span>}
-        {!blocked && preset !== "original" && naturalW > 0 && (
-          <span className="text-xs text-[var(--muted)]">{frameNote(preset, picture, movable)}</span>
+        {(!beside || trimming) && <VideoActions {...videoActionProps} />}
+        {trimming && (
+          <>
+            <div className="seg" role="group" aria-label="Frame">
+              {frameChoices.map((frame) => (
+                <button
+                  key={frame.id}
+                  type="button"
+                  disabled={saving}
+                  data-active={preset === frame.id}
+                  data-tip={frame.tip}
+                  aria-label={frame.tip}
+                  onClick={() => {
+                    setPreset(frame.id);
+                    setCropX(0.5);
+                    setCropY(0.5);
+                  }}
+                >
+                  <FrameMark wide={frame.wide} tall={frame.tall} free={frame.free} />
+                </button>
+              ))}
+            </div>
+            {saving && <span className="text-xs text-[var(--muted)]">{percent}%</span>}
+            {blocked && <span className="text-xs text-[var(--muted)]">{blocked}</span>}
+            {!blocked && preset !== "original" && naturalW > 0 && (
+              <span className="text-xs text-[var(--muted)]">{frameNote(preset, picture, movable)}</span>
+            )}
+          </>
         )}
-        <div className="ml-auto"><ToolsPlaceButton /></div>
+        {!trimming && saving && <span className="text-xs text-[var(--muted)]">{percent}%</span>}
+        {!trimming && blocked && <span className="text-xs text-[var(--muted)]">{blocked}</span>}
+        <div className="ml-auto flex items-center gap-1">
+          <ToolsPlaceButton />
+        </div>
       </div>
       <div className="fp-video-stage" ref={stageRef}>
         {!url ? <Empty text="Reading…" /> : (
@@ -1937,7 +2507,7 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
                 const video = event.currentTarget;
                 if (!info || tailing.current) return;
                 let t = video.currentTime * 1000;
-                video.muted = mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
+                video.muted = castOn.current || mute || !info.hasAudio || t < soundStart - 40 || t >= soundEnd;
                 video.volume = soundVol / 100;
                 syncExtra(video);
                 if (!video.paused && !(startMs <= 80 && endMs >= info.durationMs - 80) && (t >= endMs || t < startMs - 40)) {
@@ -1950,6 +2520,8 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
                 }
               }}
               onPlay={(event) => {
+                setPlaying(true);
+                if (castOn.current) castResume();
                 songOn.current = false;
                 cancelAnimationFrame(songFrame.current);
                 setSongPlaying(false);
@@ -1963,15 +2535,19 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
                 syncExtra(event.currentTarget);
               }}
               onPause={(event) => {
+                setPlaying(false);
+                if (castOn.current && !scrubbing.current && !event.currentTarget.seeking) castPause();
                 if (scrubbing.current || tailing.current || songOn.current) return;
                 if (info && event.currentTarget.ended && songEdge.current > info.durationMs + 80) return;
                 extraAudio.current?.pause();
               }}
               onEnded={() => {
+                if (castOn.current) castPause();
                 if (!info || scrubbing.current) return;
                 if (songEdge.current > info.durationMs + 80) startTail(info.durationMs);
               }}
               onSeeked={(event) => {
+                if (castOn.current) castSeek(Math.round(event.currentTarget.currentTime * 1000));
                 if (holding.current) {
                   holding.current = false;
                   return;
@@ -1988,7 +2564,7 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
               }}
               onError={() => setFailed(true)}
             />
-            {fitted && cut && (
+            {fitted && trimming && cut && (
               <>
                 <div className="fp-shade" style={{ left: 0, top: 0, width: "100%", height: cut.y }} />
                 <div className="fp-shade" style={{ left: 0, top: cut.y, width: cut.x, height: cut.h }} />
@@ -2008,7 +2584,7 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
         )}
         {failed && <div className="absolute inset-x-0 bottom-3 text-center text-sm text-[var(--muted)]">This file won't play here. Use Open.</div>}
       </div>
-      {info && info.durationMs > 0 && (
+      {trimming && info && info.durationMs > 0 && (
         <div className="fp-time">
           <div className="fp-time-labels">
             <div className="fp-time-label fp-time-ruler-gap">
@@ -2112,7 +2688,7 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
       </div>
       {soundOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 p-6" onMouseDown={() => setSoundOpen(false)}>
-          <div className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="fp-float w-full max-w-md border border-[var(--border)] bg-[var(--surface)] p-4" onMouseDown={(event) => event.stopPropagation()}>
             <h2 className="text-base font-semibold">Add sound</h2>
             <p className="mt-2 text-sm text-[var(--muted)]">The bar under the video is the whole song. Drag the block to choose a part, then match it to the video.</p>
             <div className="mt-3 flex gap-2">
@@ -2131,9 +2707,34 @@ function VideoView({ preview, source }: { preview: PreviewFile; source: Side }) 
 }
 
 function MediaView({ preview }: { preview: PreviewFile }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const dvd = preview.extension === "vob";
+  const castOn = useRef(false);
+  useEffect(() => {
+    const node = preview.kind === "video" ? videoRef.current : audioRef.current;
+    if (!node) return;
+    const unwatch = watchCast((on) => {
+      castOn.current = on;
+      node.muted = on;
+    });
+    const play = () => { if (castOn.current) castResume(); };
+    const pause = () => { if (castOn.current && !node.seeking) castPause(); };
+    const seeked = () => { if (castOn.current) castSeek(Math.round(node.currentTime * 1000)); };
+    node.addEventListener("play", play);
+    node.addEventListener("pause", pause);
+    node.addEventListener("seeked", seeked);
+    node.addEventListener("ended", pause);
+    return () => {
+      unwatch();
+      node.removeEventListener("play", play);
+      node.removeEventListener("pause", pause);
+      node.removeEventListener("seeked", seeked);
+      node.removeEventListener("ended", pause);
+    };
+  }, [preview.kind, url]);
   useEffect(() => {
     if (dvd) return;
     let objectUrl = "";
@@ -2161,8 +2762,8 @@ function MediaView({ preview }: { preview: PreviewFile }) {
         <img className="fp-cover" alt="" src={`data:${preview.posterMime || "image/jpeg"};base64,${preview.posterBase64}`} />
       )}
       {url && (preview.kind === "video"
-        ? <video src={url} controls onError={() => setFailed(true)} />
-        : <audio src={url} controls onError={() => setFailed(true)} />)}
+        ? <video ref={videoRef} src={url} controls onError={() => setFailed(true)} />
+        : <audio ref={audioRef} src={url} controls onError={() => setFailed(true)} />)}
       {failed && <div className="text-center text-sm text-[var(--muted)]">This file won't play here. Use Open.</div>}
     </div>
   );
@@ -2346,17 +2947,35 @@ function ListingView({ listPath, source, archive, noun = "in this folder" }: { l
   const drag = useColumnDrag();
   useEffect(() => {
     let cancel = false;
+    let settled = false;
+    const id = takeListId();
+    let unlisten: (() => void) | undefined;
     setEntries(null);
     setError(null);
-    void invoke<DirListing>("list_dir", { path: listPath })
-      .then((listing) => {
-        if (!cancel) setEntries(listing.entries);
-      })
-      .catch((reason: unknown) => {
-        if (!cancel) setError(message(reason));
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      if (cancel) return;
+      unlisten = await listen<ListBatch>("list-batch", (event) => {
+        const batch = event.payload;
+        if (cancel || settled || batch.id !== id) return;
+        setEntries((current) => (batch.seq === 0 ? batch.entries : [...(current ?? []), ...batch.entries]));
       });
+      if (cancel) {
+        unlisten();
+        return;
+      }
+      try {
+        const listing = await invoke<DirListing>("list_dir", { path: listPath, id });
+        settled = true;
+        if (!cancel) setEntries(listing.entries);
+      } catch (reason: unknown) {
+        if (!cancel && message(reason) !== "cancelled") setError(message(reason));
+      }
+    })();
     return () => {
       cancel = true;
+      unlisten?.();
+      void invoke("cancel_list", { id });
     };
   }, [listPath]);
   if (error) return <Empty text={error} />;
@@ -2466,6 +3085,89 @@ function PdfView({ data, path }: { data: string | null; path: string }) {
     <div className="flex flex-col items-center gap-3 p-3">
       {urls.map((url) => <img key={url} src={url} alt="" className="max-w-full shadow" />)}
       {more && <div className="text-xs text-[var(--muted)]">Showing the first {urls.length} pages.</div>}
+    </div>
+  );
+}
+
+function localAsset(filePath: string, url: string): string | null {
+  const value = url.trim();
+  if (!value || /^(#|https?:|data:|blob:|mailto:|file:|javascript:)/i.test(value)) return null;
+  const hashAt = value.indexOf("#");
+  const hash = hashAt >= 0 ? value.slice(hashAt) : "";
+  const before = hashAt >= 0 ? value.slice(0, hashAt) : value;
+  const queryAt = before.indexOf("?");
+  const query = queryAt >= 0 ? before.slice(queryAt) : "";
+  const rel = queryAt >= 0 ? before.slice(0, queryAt) : before;
+  if (!rel) return null;
+  let absolute = rel;
+  if (!/^[a-zA-Z]:[\\/]/.test(rel) && !rel.startsWith("\\\\") && !rel.startsWith("/")) {
+    const folder = filePath.replace(/[/\\][^/\\]*$/, "");
+    const base = folder.split(/[/\\]/).filter((part) => part.length > 0);
+    for (const part of rel.split(/[/\\]/)) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") base.pop();
+      else base.push(part);
+    }
+    absolute = folder.includes("\\") ? base.join("\\") : `/${base.join("/")}`;
+  }
+  return `${absolute}${query}${hash}`;
+}
+
+function HtmlView({ text, path, truncated }: { text: string; path: string; truncated: boolean }) {
+  const [src, setSrc] = useState(text);
+  useEffect(() => {
+    let cancel = false;
+    void (async () => {
+      const doc = new DOMParser().parseFromString(text, "text/html");
+      doc.querySelectorAll("script").forEach((node) => node.remove());
+      let convert: ((file: string) => string) | null = null;
+      if (inTauri()) {
+        try {
+          convert = (await import("@tauri-apps/api/core")).convertFileSrc;
+        } catch {
+          convert = null;
+        }
+      }
+      const rewrite = (url: string) => {
+        const file = localAsset(path, url);
+        if (!file || !convert) return url;
+        const hashAt = file.indexOf("#");
+        const queryAt = file.indexOf("?");
+        const cut = [hashAt, queryAt].filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? file.length;
+        return `${convert(file.slice(0, cut))}${file.slice(cut)}`;
+      };
+      for (const el of doc.querySelectorAll("[src], [href]")) {
+        for (const attr of ["src", "href"]) {
+          const raw = el.getAttribute(attr);
+          if (!raw) continue;
+          const next = rewrite(raw);
+          if (next !== raw) el.setAttribute(attr, next);
+        }
+      }
+      if (convert) {
+        const sheets = [...doc.querySelectorAll('link[rel~="stylesheet"][href]')];
+        await Promise.all(sheets.map(async (link) => {
+          const href = link.getAttribute("href");
+          if (!href) return;
+          try {
+            const css = await fetch(href).then((response) => response.ok ? response.text() : "");
+            if (!css || cancel) return;
+            const style = doc.createElement("style");
+            style.textContent = css;
+            link.replaceWith(style);
+          } catch { /* the page still shows without that sheet */ }
+        }));
+      }
+      if (!cancel) setSrc(`<!DOCTYPE html>${doc.documentElement.outerHTML}`);
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [text, path]);
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {truncated && <div className="shrink-0 border-b border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)]">Only the start of this file is shown.</div>}
+      <iframe className="fp-html" sandbox="" title="HTML preview" srcDoc={src} />
     </div>
   );
 }

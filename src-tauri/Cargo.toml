@@ -23,20 +23,28 @@ serde_json = "1"
 base64 = "0.22"
 portable-pty = "0.9"
 open = { version = "5", features = ["shellexecute-on-windows"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "avif"] }
 deckcraft-model = "0.6.1"
 deckcraft-pptx = "0.6.1"
 deckcraft-render = "0.6.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62.2"
 russh = "0.65.1"
 russh-sftp = "3.0.1"
 keyring = "4.2.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "process", "sync", "fs"] }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+mdns-sd = "0.21.7"
+native-tls = "0.2.18"
+
+[profile.dev.package.rav1e]
+opt-level = 3
+
+[profile.dev.package.ravif]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

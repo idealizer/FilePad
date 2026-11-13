@@ -1,9 +1,9 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { armDrag, useDragSession } from "../lib/drag";
+import { armDrag, takeDragMenu, useDragSession } from "../lib/drag";
 import { FileIcon } from "../lib/fileIcon";
-import { treeRows } from "../lib/rows";
+import { folderNote, treeRows } from "../lib/rows";
 import { holdScrollSync, useLinkedScroll } from "../lib/scrollLock";
 import { useApp } from "../stores/appStore";
 import type { Side } from "../types";
@@ -33,7 +33,8 @@ export function DirTree({ side }: { side: Side }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <SortHead side={side} />
       <div ref={parent} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-      {!rows.length && <div className="px-3 py-6 text-center text-[var(--muted)]">{panel.loading ? "Reading…" : "This folder is empty."}</div>}
+      {panel.error && <div className="px-3 py-6 text-center text-[var(--danger)]">{panel.error}</div>}
+      {folderNote(panel, rows.length, showHidden) && <div className="px-3 py-6 text-center text-[var(--muted)]">{folderNote(panel, rows.length, showHidden)}</div>}
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((item) => {
           const row = rows[item.index];
@@ -51,13 +52,14 @@ export function DirTree({ side }: { side: Side }) {
                 clickEntry(side, item.index);
               }}
               onPointerDown={(event) => {
-                if (event.button !== 0) return;
+                if (event.button !== 0 && event.button !== 2) return;
                 if (event.target instanceof Element && event.target.closest("button")) return;
                 const path = row.path;
                 armDrag(event, () => [path]);
               }}
               onDoubleClick={() => void openCurrent()}
               onContextMenu={(event) => {
+                if (takeDragMenu(event)) return;
                 event.preventDefault();
                 event.stopPropagation();
                 setActive(side);
@@ -81,7 +83,8 @@ export function DirTree({ side }: { side: Side }) {
                 <span style={{ width: 22, minWidth: 22 }} />
               )}
               <FileIcon isDir={row.isDir} extension={row.extension} />
-              <FileName className="min-w-0 flex-1 truncate" name={row.name} path={row.path} isDir={row.isDir} selected={item.index === panel.cursor} activate="slow" />
+              <FileName className={row.place ? "max-w-[50%] truncate" : "min-w-0 flex-1 truncate"} name={row.name} path={row.path} isDir={row.isDir} selected={item.index === panel.cursor} activate="slow" />
+              {row.place && <span className="fp-place">{row.place}</span>}
             </div>
           );
         })}

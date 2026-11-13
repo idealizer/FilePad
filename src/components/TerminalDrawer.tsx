@@ -19,10 +19,13 @@ function termTheme() {
 
 export function TerminalDrawer() {
   const open = useApp((state) => state.terminalOpen);
+  const expanded = useApp((state) => state.terminalExpanded);
   const height = useApp((state) => state.terminalHeight);
   const setHeight = useApp((state) => state.setTerminalHeight);
   const theme = useApp((state) => state.theme);
   const toggleTerminal = useApp((state) => state.toggleTerminal);
+  const expandTerminal = useApp((state) => state.expandTerminal);
+  const restoreTerminal = useApp((state) => state.restoreTerminal);
   const activePath = useApp((state) => state.panels[state.active].path);
   const profiles = useApp((state) => state.sftpProfiles);
   const remote = remoteParts(activePath);
@@ -82,19 +85,25 @@ export function TerminalDrawer() {
     fit.current.fit();
     const terminal = term.current;
     void invoke("terminal_resize", { cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-  }, [theme, open]);
+    if (expanded) terminal.focus();
+  }, [theme, open, expanded]);
 
   return (
-    <div className="fp-term shrink-0 flex-col" style={{ display: open ? "flex" : "none", height }}>
-      <div
-        className="fp-hdrag"
-        title="Drag to resize the terminal"
-        onDoubleClick={() => setHeight(240)}
-        onPointerDown={(event) => {
-          const term = event.currentTarget.parentElement;
-          if (term instanceof HTMLElement) dragHeight(event, term, 120, window.innerHeight * 0.7, setHeight);
-        }}
-      />
+    <div
+      className={`fp-term min-h-0 flex-col ${expanded ? "flex-1" : "shrink-0"}`}
+      style={open ? (expanded ? { display: "flex", height: "auto" } : { display: "flex", height }) : { display: "none", height }}
+    >
+      {!expanded && (
+        <div
+          className="fp-hdrag"
+          title="Drag to resize the terminal"
+          onDoubleClick={() => setHeight(240)}
+          onPointerDown={(event) => {
+            const term = event.currentTarget.parentElement;
+            if (term instanceof HTMLElement) dragHeight(event, term, 120, window.innerHeight * 0.7, setHeight);
+          }}
+        />
+      )}
       <div className="flex h-8 items-center gap-2 px-2">
         <span className="text-xs text-[var(--muted)]">{title}</span>
         <span className="flex-1" />
@@ -109,6 +118,7 @@ export function TerminalDrawer() {
         >
           Use this folder
         </button>
+        <button className="btn sm" onClick={() => (expanded ? restoreTerminal() : expandTerminal())}>{expanded ? "Restore" : "Expand"}</button>
         <button className="btn sm" onClick={toggleTerminal}>Close</button>
       </div>
       <div ref={host} className="min-h-0 flex-1" />

@@ -1,23 +1,31 @@
 import { useToasts } from "../stores/toastStore";
 
-const colors = { success: "var(--ok)", error: "var(--danger)", warning: "var(--warn)" };
-
 export function ToastHost() {
   const toasts = useToasts((state) => state.toasts);
   const dismiss = useToasts((state) => state.dismiss);
   return (
-    <div className="pointer-events-none fixed bottom-12 right-4 z-50 flex w-80 flex-col gap-2">
-      {toasts.map((item) => (
-        <button
-          key={item.id}
-          className="pointer-events-auto rounded-xl border px-3 py-2 text-left text-sm shadow-lg"
-          style={{ background: "var(--surface)", borderColor: colors[item.kind] }}
-          onClick={() => dismiss(item.id)}
-        >
-          <span className="mb-1 block h-1 w-8 rounded" style={{ background: colors[item.kind] }} />
-          {item.text}
-        </button>
-      ))}
+    <div className="pointer-events-none fixed bottom-12 right-4 z-50 flex w-80 flex-col gap-2" aria-live="polite">
+      {toasts.map((item) => {
+        const busy = item.kind === "progress" && item.ratio == null;
+        const width = item.kind === "progress" && item.ratio != null ? `${Math.round(Math.min(1, Math.max(0, item.ratio)) * 100)}%` : undefined;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            className="fp-toast pointer-events-auto"
+            data-kind={item.kind}
+            title={item.text}
+            onClick={() => dismiss(item.id)}
+          >
+            <span className="fp-toast-text">{item.text}</span>
+            {item.kind === "progress" && (
+              <span className="fp-toast-bar" data-busy={busy ? "true" : undefined} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={width ? Math.round((item.ratio ?? 0) * 100) : undefined}>
+                <span style={!busy && width ? { width } : undefined} />
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

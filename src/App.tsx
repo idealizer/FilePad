@@ -12,8 +12,8 @@ import { ToastHost } from "./components/Toast";
 import { Toolbar } from "./components/Toolbar";
 import { iconColumns } from "./components/IconView";
 import { inTauri, invoke, isTyping, message, setWindowTitle } from "./lib/platform";
-import { actionSide, useApp } from "./stores/appStore";
-import type { CmdChunk, ThemeMode, TransferProgress } from "./types";
+import { actionSide, noteExternalFolder, useApp } from "./stores/appStore";
+import type { CmdChunk, ListBatch, ThemeMode, TransferProgress } from "./types";
 
 function SplitPanels() {
   const split = useApp((state) => state.split);
@@ -22,7 +22,7 @@ function SplitPanels() {
   const left = useRef<HTMLDivElement>(null);
   const ratio = useRef(split);
   return (
-    <div ref={frame} className="flex min-h-0 min-w-0 flex-1 p-1">
+    <div ref={frame} className="fp-panes flex min-h-0 min-w-0 flex-1">
       <div ref={left} className="flex min-w-0" style={{ flex: `0 0 ${split * 100}%` }}>
         <Panel side="left" />
       </div>
@@ -72,6 +72,10 @@ function panelView(store: ReturnType<typeof useApp.getState>) {
   return store.panels[actionSide(store)].view;
 }
 
+function inTerminal(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.closest(".xterm") !== null;
+}
+
 function keepFieldKeys(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.closest(".xterm")) return true;
@@ -90,7 +94,7 @@ function focusFilePanel(store: ReturnType<typeof useApp.getState>) {
   if (panel && document.activeElement !== panel) panel.focus();
 }
 
-function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" {
+function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" | "glass" {
   if (theme === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   return theme;
 }
@@ -99,6 +103,7 @@ export default function App() {
   const boot = useApp((state) => state.boot);
   const persist = useApp((state) => state.persist);
   const theme = useApp((state) => state.theme);
+  const pathStyle = useApp((state) => state.pathStyle);
   const ready = useApp((state) => state.ready);
   const leftPath = useApp((state) => state.panels.left.path);
   const rightPath = useApp((state) => state.panels.right.path);
@@ -109,6 +114,8 @@ export default function App() {
   const leftIconSize = useApp((state) => state.panels.left.iconSize);
   const rightIconSize = useApp((state) => state.panels.right.iconSize);
   const keyBar = useApp((state) => state.keyBar);
+  const terminalOpen = useApp((state) => state.terminalOpen);
+  const terminalExpanded = useApp((state) => state.terminalExpanded);
   const scrollLock = useApp((state) => state.scrollLock);
   const iconTints = useApp((state) => state.iconTints);
   const leftHistoryAt = useApp((state) => state.panels.left.historyAt);
@@ -147,7 +154,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
+  }, [ready, persist, theme, pathStyle, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -155,6 +162,8 @@ export default function App() {
     let unlistenTransfer: (() => void) | undefined;
     let unlistenDrop: (() => void) | undefined;
     let unlistenBridge: (() => void) | undefined;
+    let unlistenFolder: (() => void) | undefined;
+    let unlistenList: (() => void) | undefined;
     let cancel = false;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
@@ -171,6 +180,8 @@ export default function App() {
           }
         })();
       });
+      const folder = await listen<string>("open-folder", (event) => noteExternalFolder(event.payload));
+      const listed = await listen<ListBatch>("list-batch", (event) => useApp.getState().onListBatch(event.payload));
       const drop = await getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type !== "drop") return;
         const state = useApp.getState();
@@ -181,12 +192,16 @@ export default function App() {
         transfer();
         drop();
         bridge();
+        folder();
+        listed();
         return;
       }
       unlistenCmd = cmd;
       unlistenTransfer = transfer;
       unlistenDrop = drop;
       unlistenBridge = bridge;
+      unlistenFolder = folder;
+      unlistenList = listed;
     })();
     return () => {
       cancel = true;
@@ -194,6 +209,8 @@ export default function App() {
       unlistenTransfer?.();
       unlistenDrop?.();
       unlistenBridge?.();
+      unlistenFolder?.();
+      unlistenList?.();
     };
   }, []);
 
@@ -248,6 +265,7 @@ export default function App() {
         return;
       }
       if (event.key === "Tab") {
+        if (inTerminal(event.target)) return;
         event.preventDefault();
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         store.cyclePanel(event.shiftKey ? -1 : 1);
@@ -269,12 +287,14 @@ export default function App() {
         return;
       }
       if (key === "F2") { if (isTyping(event.target)) return; event.preventDefault(); store.askRename(); return; }
-      if (key === "F3") { event.preventDefault(); store.previewOther(); return; }
-      if (key === "F4") { event.preventDefault(); void store.openCurrent(); return; }
-      if (key === "F5") { event.preventDefault(); void store.copyToOther(); return; }
-      if (key === "F6") { event.preventDefault(); void store.moveToOther(); return; }
-      if (key === "F7") { event.preventDefault(); if (event.shiftKey) store.askMkfile(); else store.askMkdir(); return; }
-      if (key === "F8") { event.preventDefault(); store.askDelete(); return; }
+      if (!inTerminal(event.target)) {
+        if (key === "F3") { event.preventDefault(); store.previewOther(); return; }
+        if (key === "F4") { event.preventDefault(); void store.openCurrent(); return; }
+        if (key === "F5") { event.preventDefault(); void store.copyToOther(); return; }
+        if (key === "F6") { event.preventDefault(); void store.moveToOther(); return; }
+        if (key === "F7") { event.preventDefault(); if (event.shiftKey) store.askMkfile(); else store.askMkdir(); return; }
+        if (key === "F8") { event.preventDefault(); store.askDelete(); return; }
+      }
       if (event.altKey && key === "Enter") { event.preventDefault(); store.askProperties(); return; }
       if (event.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) {
         event.preventDefault();
@@ -336,8 +356,8 @@ export default function App() {
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-[var(--bg)] text-[var(--text)]">
       <Toolbar />
-      <SplitPanels />
-      <CommandLine />
+      {!(terminalOpen && terminalExpanded) && <SplitPanels />}
+      {!(terminalOpen && terminalExpanded) && <CommandLine />}
       <TerminalDrawer />
       {keyBar && <KeyBar />}
       <StatusBar />

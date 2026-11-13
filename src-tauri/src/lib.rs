@@ -1,8 +1,10 @@
 mod bridge;
+mod cast;
 mod convert;
 mod deckpaint;
 mod docs;
 mod dragout;
+mod explorer;
 mod fsops;
 mod gzipnav;
 mod mcp;
@@ -16,11 +18,16 @@ mod video;
 mod zipnav;
 
 use shell::ShellState;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
-async fn file_thumb(path: String) -> Result<thumbs::Thumb, String> {
-    tauri::async_runtime::spawn_blocking(move || thumbs::file_thumb(&path)).await.map_err(|err| err.to_string())?
+async fn file_thumb(path: String, id: u64) -> Result<thumbs::Thumb, String> {
+    thumbs::request(path, id).await
+}
+
+#[tauri::command]
+fn cancel_thumb(id: u64) {
+    thumbs::cancel(id);
 }
 
 #[tauri::command]
@@ -39,8 +46,23 @@ fn list_places() -> Vec<fsops::Place> {
 }
 
 #[tauri::command]
-async fn list_dir(path: String) -> Result<fsops::DirListing, String> {
-    tauri::async_runtime::spawn_blocking(move || fsops::list_dir(&path)).await.map_err(|err| err.to_string())?
+async fn list_dir(app: tauri::AppHandle, path: String, id: u64) -> Result<fsops::DirListing, String> {
+    tauri::async_runtime::spawn_blocking(move || fsops::list_dir(&app, &path, id)).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+fn cancel_list(id: u64) {
+    fsops::cancel_list(id);
+}
+
+#[tauri::command]
+fn cancel_search() {
+    fsops::cancel_search();
+}
+
+#[tauri::command]
+async fn search_dir(path: String, query: String, show_hidden: bool) -> Result<fsops::SearchListing, String> {
+    tauri::async_runtime::spawn_blocking(move || fsops::search_dir(&path, &query, show_hidden)).await.map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -139,6 +161,9 @@ async fn trim_image(
     quarters: i32,
     flip_h: bool,
     flip_v: bool,
+    tone: String,
+    spots: Vec<convert::BlurSpot>,
+    strength: f32,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         convert::trim_image(
@@ -155,6 +180,9 @@ async fn trim_image(
             quarters,
             flip_h,
             flip_v,
+            &tone,
+            &spots,
+            strength,
         )
     })
     .await
@@ -228,15 +256,50 @@ fn pick_sound_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn cast_screens() -> Result<Vec<cast::Screen>, String> {
+    tauri::async_runtime::spawn_blocking(cast::screens).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn cast_play(path: String, screen: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || cast::play(&path, &screen)).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn cast_pause() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(cast::pause).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn cast_resume() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(cast::resume).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn cast_seek(ms: u64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || cast::seek(ms)).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+fn cast_stop() -> Result<(), String> {
+    cast::stop()
+}
+
+#[tauri::command]
 async fn probe_sound(app: tauri::AppHandle, path: String) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || video::probe_sound(&app, &path)).await.map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-async fn save_image(path: String, quarters: i32, flip_h: bool, flip_v: bool) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || preview::save_image(&path, quarters, flip_h, flip_v))
+async fn save_image(path: String, quarters: i32, flip_h: bool, flip_v: bool, tone: String, spots: Vec<convert::BlurSpot>, strength: f32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || preview::save_image(&path, quarters, flip_h, flip_v, &tone, &spots, strength))
         .await
         .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn save_text(path: String, text: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || preview::save_text(&path, &text)).await.map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -446,18 +509,43 @@ fn reveal_main_window(app: &tauri::AppHandle) {
     let _ = window.set_focus();
 }
 
+#[tauri::command]
+fn folder_app_status() -> explorer::FolderAppStatus {
+    explorer::folder_app_status()
+}
+
+#[tauri::command]
+fn set_folder_app(enabled: bool) -> Result<(), String> {
+    explorer::set_folder_app(enabled)
+}
+
+#[tauri::command]
+fn take_launch_folder() -> Option<String> {
+    explorer::take_launched()
+}
+
+pub fn yield_folder_to_explorer() -> bool {
+    explorer::yield_folder_to_explorer()
+}
+
 pub fn run() {
+    explorer::remember_launch_args();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            if let Some(path) = explorer::folder_from_args(&args) {
+                explorer::note_launched(path.clone());
+                let _ = app.emit("open-folder", path);
+            }
         }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             bridge::start(app.handle().clone());
+            explorer::maintain_folder_app();
             reveal_main_window(app.handle());
             Ok(())
         })
@@ -467,9 +555,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_file_drag,
             file_thumb,
+            cancel_thumb,
             home_dir,
             list_places,
             list_dir,
+            cancel_list,
+            cancel_search,
+            search_dir,
             make_dir,
             make_file,
             copy_to_clipboard,
@@ -491,7 +583,14 @@ pub fn run() {
             cancel_video,
             pick_sound_file,
             probe_sound,
+            cast_screens,
+            cast_play,
+            cast_pause,
+            cast_resume,
+            cast_seek,
+            cast_stop,
             save_image,
+            save_text,
             export_zip_entry,
             open_item,
             describe_items,
@@ -514,7 +613,10 @@ pub fn run() {
             mcp_delete_server,
             mcp_tools,
             mcp_call,
-            bridge_reply
+            bridge_reply,
+            folder_app_status,
+            set_folder_app,
+            take_launch_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running FilePad");

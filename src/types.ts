@@ -1,6 +1,7 @@
 export type Side = "left" | "right";
 export type ViewMode = "files" | "details" | "icons" | "tree" | "preview";
-export type ThemeMode = "light" | "dark" | "system" | "retro";
+export type ThemeMode = "light" | "dark" | "glass" | "system" | "retro";
+export type PathStyle = "breadcrumb" | "text";
 export type SortKey = "name" | "size" | "modified" | "type";
 export type ToastKind = "success" | "error" | "warning";
 
@@ -20,11 +21,28 @@ export interface DirListing {
   entries: Entry[];
 }
 
+export interface ListBatch {
+  id: number;
+  seq: number;
+  path: string;
+  parent: string | null;
+  entries: Entry[];
+  done: boolean;
+}
+
+export interface SearchListing {
+  entries: Entry[];
+  limited: boolean;
+  cap: number;
+}
+
 export interface Place {
   name: string;
   path: string;
   kind: "place" | "drive";
   role?: string;
+  total?: number;
+  free?: number;
 }
 
 export interface NavPin {
@@ -42,6 +60,11 @@ export interface Panel {
   view: ViewMode;
   listView: "files" | "details" | "icons";
   filter: string;
+  hits: Entry[];
+  searching: boolean;
+  searched: string;
+  searchLimited: boolean;
+  searchCap: number;
   sortKey: SortKey;
   sortAsc: boolean;
   loading: boolean;
@@ -66,6 +89,7 @@ export interface TransferProgress {
   total: number;
   current: string;
   label?: string;
+  bytes?: boolean;
 }
 
 export interface ConvertReport {
@@ -184,6 +208,7 @@ export interface ContextMenuState {
   paths: string[];
   pin?: string;
   connectionId?: string;
+  drop?: { sources: string[]; dest: string };
 }
 
 export interface CmdChunk {

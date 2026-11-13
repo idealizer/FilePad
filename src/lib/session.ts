@@ -1,10 +1,11 @@
-import type { NavPin, ThemeMode, ViewMode } from "../types";
+import type { NavPin, PathStyle, ThemeMode, ViewMode } from "../types";
 import { ICON_COLUMNS_DEFAULT } from "./iconSize";
 import type { NameTemplate } from "./names";
 import { inTauri } from "./platform";
 
 export interface SessionData {
   theme: ThemeMode;
+  pathStyle?: PathStyle;
   leftPath: string;
   rightPath: string;
   leftView: ViewMode;
@@ -37,6 +38,7 @@ const FALLBACK = "filepad-session";
 export function defaultSession(): SessionData {
   return {
     theme: "system",
+    pathStyle: "breadcrumb",
     leftPath: "",
     rightPath: "",
     leftView: "details",

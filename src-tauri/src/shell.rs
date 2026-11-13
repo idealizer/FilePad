@@ -182,8 +182,49 @@ pub fn terminal_resize(state: &ShellState, cols: u16, rows: u16) -> Result<(), S
 }
 
 pub fn terminal_cd(state: &ShellState, path: &str) -> Result<(), String> {
+    if shell_busy(state)? {
+        return Err("A program is using the terminal.".into());
+    }
     let command = cd_command(path);
     terminal_write(state, command.as_bytes())
+}
+
+fn shell_busy(state: &ShellState) -> Result<bool, String> {
+    let guard = state.pty_child.lock().map_err(|err| err.to_string())?;
+    let Some(child) = guard.as_ref() else { return Ok(false) };
+    let Some(pid) = child.process_id() else { return Ok(true) };
+    Ok(has_child_process(pid))
+}
+
+#[cfg(windows)]
+fn has_child_process(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return true };
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                if entry.th32ParentProcessID == pid {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        found
+    }
+}
+
+#[cfg(not(windows))]
+fn has_child_process(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps").args(["-o", "pid=", "-ppid", &pid.to_string()]).output() else { return true };
+    output.status.success() && output.stdout.iter().any(|byte| !byte.is_ascii_whitespace())
 }
 
 fn pump(app: AppHandle, id: String, mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {

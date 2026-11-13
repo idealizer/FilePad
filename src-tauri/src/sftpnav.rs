@@ -1145,7 +1145,7 @@ fn count_local(path: &Path) -> u64 {
 }
 
 fn emit(app: &AppHandle, done: u64, total: u64, current: &str) {
-    let _ = app.emit("transfer-progress", TransferProgress { done, total, current: current.to_string() });
+    let _ = app.emit("transfer-progress", TransferProgress { done, total, current: current.to_string(), bytes: false });
 }
 
 fn sftp_err(err: impl std::fmt::Display) -> String {

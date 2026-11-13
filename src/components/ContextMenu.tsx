@@ -63,6 +63,19 @@ export function ContextMenu() {
     action();
   };
   const store = () => useApp.getState();
+  if (menu.drop) {
+    const drop = menu.drop;
+    const count = drop.sources.length;
+    return (
+      <div ref={ref} className="menu fp-context" style={{ left: pos.x, top: pos.y }} onMouseDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+        <div className="menu-label">{count} {count === 1 ? "item" : "items"}</div>
+        <button className="menu-item" onClick={() => run(() => void store().beginTransfer("cut", drop.sources, drop.dest))}><MoveRight />Move here</button>
+        <button className="menu-item" onClick={() => run(() => void store().beginTransfer("copy", drop.sources, drop.dest))}><Copy />Copy here</button>
+        <div className="menu-sep" />
+        <button className="menu-item" onClick={() => run(() => undefined)}>Cancel</button>
+      </div>
+    );
+  }
   if (menu.connectionId) {
     const id = menu.connectionId;
     return (

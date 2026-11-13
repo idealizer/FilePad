@@ -1,8 +1,26 @@
 import { Disc, Download, FileText, Folder, HardDrive, House, Images, MemoryStick, Monitor, Network, Usb } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { pathKey, remoteParts } from "../lib/format";
+import { formatBytes, pathKey, remoteParts } from "../lib/format";
 import { useApp } from "../stores/appStore";
 import type { Place, Side } from "../types";
+
+const CAPACITY_FULL = 0.9;
+
+function CapacityDonut({ used, total }: { used: number; total: number }) {
+  const ratio = total > 0 ? Math.min(1, Math.max(0, used / total)) : 0;
+  const radius = 5.4;
+  const length = 2 * Math.PI * radius;
+  return (
+    <svg className="fp-capacity" data-full={ratio >= CAPACITY_FULL ? "true" : undefined} viewBox="0 0 16 16" aria-hidden="true">
+      <circle className="fp-capacity-track" cx="8" cy="8" r={radius} fill="none" strokeWidth="2.4" />
+      {ratio >= 0.995 ? (
+        <circle className="fp-capacity-used" cx="8" cy="8" r={radius} fill="none" strokeWidth="2.4" />
+      ) : ratio > 0.005 ? (
+        <circle className="fp-capacity-used" cx="8" cy="8" r={radius} fill="none" strokeWidth="2.4" strokeLinecap="round" strokeDasharray={`${length * ratio} ${length}`} transform="rotate(-90 8 8)" />
+      ) : null}
+    </svg>
+  );
+}
 
 function placeIcon(place: { name: string; kind: string; role?: string }) {
   switch (place.role || place.name.toLowerCase()) {
@@ -19,9 +37,21 @@ function placeIcon(place: { name: string; kind: string; role?: string }) {
   }
 }
 
+function driveIcon(place: Place) {
+  if (place.role === "fixed" && place.total && place.free != null) {
+    return <CapacityDonut used={Math.max(0, place.total - place.free)} total={place.total} />;
+  }
+  return placeIcon(place);
+}
+
+function driveTitle(place: Place) {
+  if (place.total && place.free != null) return `${place.path} — ${formatBytes(place.free)} free of ${formatBytes(place.total)}`;
+  return place.path;
+}
+
 function pinIcon(path: string, places: Place[]) {
   const place = places.find((item) => pathKey(item.path) === pathKey(path));
-  return place ? placeIcon(place) : <Folder />;
+  return place ? driveIcon(place) : <Folder />;
 }
 
 export function PanelNav({ side }: { side: Side }) {
@@ -132,7 +162,7 @@ export function PanelNav({ side }: { side: Side }) {
       </div>
       <div className="fp-nav-sep" />
       {drives.map((drive) => (
-        <NavButton key={drive.path} icon={placeIcon(drive)} label={drive.name} title={drive.path} active={pathKey(drive.path) === pathKey(here)} onClick={() => open(drive.path)} />
+        <NavButton key={drive.path} icon={driveIcon(drive)} label={drive.name} title={driveTitle(drive)} active={pathKey(drive.path) === pathKey(here)} onClick={() => open(drive.path)} />
       ))}
       {profiles.length > 0 && <div className="fp-nav-sep" />}
       {profiles.map((profile) => (

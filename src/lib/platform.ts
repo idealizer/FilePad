@@ -1,6 +1,7 @@
 import { toast } from "../stores/toastStore";
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
+export const isWindows = typeof navigator !== "undefined" && /Windows/.test(navigator.userAgent);
 
 export function keys(combo: string): string {
   if (!isMac) return combo;

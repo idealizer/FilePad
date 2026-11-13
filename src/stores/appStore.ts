@@ -2,14 +2,173 @@ import { create } from "zustand";
 import { archiveFile, baseName, canExtract, diskFolder, isPackedPath, isRemotePath, isStillImage, joinPath, pathKey, remoteParts } from "../lib/format";
 import { ICON_COLUMNS_DEFAULT, iconColumnsOf } from "../lib/iconSize";
 import type { NameSource, NameTemplate } from "../lib/names";
-import { fileRows, treeRows } from "../lib/rows";
+import { fileRows, hasLocalMatch, treeRows } from "../lib/rows";
 import { alignScroll, holdScrollSync, setScrollLock } from "../lib/scrollLock";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
 import { readSession, writeSession } from "../lib/session";
-import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, McpTool, ModalState, NavPin, Panel, PendingTransfer, Place, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
-import { toast } from "./toastStore";
+import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, ListBatch, McpTool, ModalState, NavPin, Panel, PathStyle, PendingTransfer, Place, SearchListing, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
+import { jobCancel, jobFinish, jobStart, jobUpdate, toast } from "./toastStore";
 
 let deleting = false;
+let transferJob: string | null = null;
+let externalFolder = "";
+let listSeq = 0;
+const listActive: Record<Side, number> = { left: 0, right: 0 };
+const listJobs = new Map<number, ListJob>();
+
+type ListJob = {
+  side: Side;
+  mode: "open" | "refresh";
+  record: boolean;
+  opened: boolean;
+  settled: boolean;
+  pinned: string | null;
+};
+
+export function takeListId(): number {
+  listSeq += 1;
+  return listSeq;
+}
+
+function beginList(side: Side, mode: ListJob["mode"], record: boolean): number {
+  const prev = listActive[side];
+  if (prev) void invoke("cancel_list", { id: prev });
+  const id = takeListId();
+  listActive[side] = id;
+  listJobs.set(id, { side, mode, record, opened: false, settled: false, pinned: null });
+  return id;
+}
+
+function listStopped(side: Side, id: number, error: unknown): boolean {
+  return listActive[side] !== id || message(error) === "cancelled";
+}
+
+function applyOpen(side: Side, listing: DirListing, record: boolean, loading: boolean) {
+  useApp.setState((state) => {
+    const panel = state.panels[side];
+    let history = panel.history;
+    let historyAt = panel.historyAt;
+    let viewHistory = panel.viewHistory ?? [];
+    if (record && history[historyAt]?.toLowerCase() !== listing.path.toLowerCase()) {
+      const prior = viewHistory.length === history.length ? viewHistory : history.map(() => panel.view);
+      history = [...history.slice(0, historyAt + 1), listing.path].slice(-48);
+      viewHistory = [...prior.slice(0, historyAt + 1), panel.view].slice(-48);
+      historyAt = history.length - 1;
+    }
+    const recent = [listing.path, ...state.recent.filter((item) => item !== listing.path)].slice(0, 12);
+    return {
+      recent,
+      panels: patch(state.panels, side, {
+        path: listing.path,
+        parent: listing.parent,
+        entries: listing.entries,
+        cursor: 0,
+        anchor: 0,
+        marked: [],
+        filter: "",
+        hits: [],
+        searching: false,
+        searched: "",
+        searchLimited: false,
+        searchCap: 0,
+        loading,
+        error: null,
+        treeKids: panel.view === "tree" ? { [listing.path]: listing.entries } : {},
+        treeExpanded: [],
+        history,
+        historyAt,
+        viewHistory,
+        localPath: isRemotePath(listing.path) ? panel.localPath : listing.path,
+      }),
+    };
+  });
+}
+
+function appendListed(side: Side, batch: ListBatch, pinned: string | null) {
+  useApp.setState((state) => {
+    const panel = state.panels[side];
+    const entries = panel.entries.concat(batch.entries);
+    let cursor = panel.cursor;
+    let anchor = panel.anchor;
+    if (pinned) {
+      const rows = fileRows({ ...panel, entries, path: batch.path, parent: batch.parent }, state.showHidden);
+      const index = rows.findIndex((row) => row.path === pinned);
+      if (index >= 0) {
+        cursor = index;
+        anchor = index;
+      }
+    }
+    const treeKids = panel.view === "tree" ? { ...panel.treeKids, [batch.path]: entries } : panel.treeKids;
+    return {
+      panels: patch(state.panels, side, {
+        path: batch.path,
+        parent: batch.parent,
+        entries,
+        loading: !batch.done,
+        error: null,
+        cursor,
+        anchor,
+        treeKids,
+      }),
+    };
+  });
+}
+
+function settleOpen(side: Side, listing: DirListing, pinned: string | null) {
+  useApp.setState((state) => {
+    const panel = state.panels[side];
+    let cursor = panel.cursor;
+    let anchor = panel.anchor;
+    if (pinned) {
+      const rows = fileRows({ ...panel, entries: listing.entries, path: listing.path, parent: listing.parent }, state.showHidden);
+      const index = rows.findIndex((row) => row.path === pinned);
+      if (index >= 0) {
+        cursor = index;
+        anchor = index;
+      }
+    }
+    const treeKids = panel.view === "tree" ? { ...panel.treeKids, [listing.path]: listing.entries } : panel.treeKids;
+    return {
+      panels: patch(state.panels, side, {
+        path: listing.path,
+        parent: listing.parent,
+        entries: listing.entries,
+        loading: false,
+        error: null,
+        cursor,
+        anchor,
+        treeKids,
+      }),
+    };
+  });
+}
+
+export function noteExternalFolder(path: string) {
+  const clean = path.trim();
+  if (!clean) return;
+  if (useApp.getState().ready) void useApp.getState().openLaunchedFolder(clean);
+  else externalFolder = clean;
+}
+
+function startTransferJob(text: string) {
+  if (transferJob) jobCancel(transferJob);
+  transferJob = jobStart(text);
+}
+
+function finishTransferJob(kind: "success" | "error" | "warning", text: string) {
+  if (!transferJob) {
+    toast(kind, text);
+    return;
+  }
+  jobFinish(transferJob, kind, text);
+  transferJob = null;
+}
+
+function cancelTransferJob() {
+  if (!transferJob) return;
+  jobCancel(transferJob);
+  transferJob = null;
+}
 
 function emptyPanel(path = ""): Panel {
   return {
@@ -22,6 +181,11 @@ function emptyPanel(path = ""): Panel {
     view: "details",
     listView: "details",
     filter: "",
+    hits: [],
+    searching: false,
+    searched: "",
+    searchLimited: false,
+    searchCap: 0,
     sortKey: "name",
     sortAsc: true,
     loading: false,
@@ -77,6 +241,54 @@ function chosen(state: { showHidden: boolean; panels: { left: Panel; right: Pane
 
 function patch(panels: { left: Panel; right: Panel }, side: Side, update: Partial<Panel>): { left: Panel; right: Panel } {
   return { ...panels, [side]: { ...panels[side], ...update } };
+}
+
+const searchTimer: Record<Side, number> = { left: 0, right: 0 };
+const searchToken: Record<Side, number> = { left: 0, right: 0 };
+
+function stopSearch(side: Side) {
+  window.clearTimeout(searchTimer[side]);
+  searchToken[side] += 1;
+  if (useApp.getState().panels[side].searching) void invoke("cancel_search").catch(() => undefined);
+}
+
+function scheduleSearch(side: Side) {
+  window.clearTimeout(searchTimer[side]);
+  searchTimer[side] = window.setTimeout(() => {
+    const state = useApp.getState();
+    const panel = state.panels[side];
+    if (!panel.filter.trim() || hasLocalMatch(panel, state.showHidden)) return;
+    void runSearch(side, false);
+  }, 200);
+}
+
+async function runSearch(side: Side, asked: boolean) {
+  window.clearTimeout(searchTimer[side]);
+  const token = ++searchToken[side];
+  const state = useApp.getState();
+  const panel = state.panels[side];
+  const query = panel.filter.trim();
+  if (!query || !panel.path) return;
+  if (isRemotePath(panel.path) || isPackedPath(panel.path)) {
+    if (searchToken[side] !== token) return;
+    useApp.setState((current) => ({ panels: patch(current.panels, side, { hits: [], searching: false, searched: query, searchLimited: false, searchCap: 0 }) }));
+    if (asked) toast("warning", "Search looks through folders on this computer.");
+    return;
+  }
+  useApp.setState((current) => ({ panels: patch(current.panels, side, { searching: true }) }));
+  try {
+    const found = await invoke<SearchListing>("search_dir", { path: panel.path, query, showHidden: state.showHidden });
+    if (searchToken[side] !== token) return;
+    const now = useApp.getState().panels[side];
+    if (now.filter.trim().toLowerCase() !== query.toLowerCase() || pathKey(now.path) !== pathKey(panel.path)) return;
+    useApp.setState((current) => ({
+      panels: patch(current.panels, side, { hits: found.entries, searching: false, searched: query, searchLimited: found.limited, searchCap: found.cap }),
+    }));
+  } catch (error) {
+    if (searchToken[side] !== token) return;
+    useApp.setState((current) => ({ panels: patch(current.panels, side, { searching: false, searched: query, hits: [], searchLimited: false, searchCap: 0 }) }));
+    toast("error", message(error));
+  }
 }
 
 function selectionSources(state: { active: Side; showHidden: boolean; panels: { left: Panel; right: Panel } }): { items: NameSource[]; taken: string[] } {
@@ -159,6 +371,7 @@ function storedTemplates(value: NameTemplate[] | undefined): NameTemplate[] {
 interface AppState {
   ready: boolean;
   theme: ThemeMode;
+  pathStyle: PathStyle;
   active: Side;
   panels: { left: Panel; right: Panel };
   showHidden: boolean;
@@ -173,6 +386,8 @@ interface AppState {
   pins: NavPin[];
   clipboard: Clipboard | null;
   textpad: boolean;
+  folderAppSupported: boolean;
+  folderApp: boolean;
   command: string;
   commandHistory: string[];
   commandCursor: number;
@@ -182,6 +397,7 @@ interface AppState {
   running: boolean;
   runId: string | null;
   terminalOpen: boolean;
+  terminalExpanded: boolean;
   split: number;
   outputHeight: number;
   terminalHeight: number;
@@ -200,6 +416,7 @@ interface AppState {
   unpinPath: (path: string) => void;
   movePin: (from: number, to: number) => void;
   setTheme: (theme: ThemeMode) => void;
+  setPathStyle: (pathStyle: PathStyle) => void;
   setActive: (side: Side) => void;
   cyclePanel: (dir: 1 | -1) => void;
   navigate: (side: Side, path: string, record?: boolean) => Promise<void>;
@@ -207,6 +424,7 @@ interface AppState {
   refresh: (side: Side) => Promise<void>;
   refreshBoth: () => Promise<void>;
   setFilter: (side: Side, filter: string) => void;
+  searchDeeper: (side: Side) => void;
   setView: (side: Side, view: ViewMode) => void;
   setSort: (side: Side, key: SortKey) => void;
   moveCursor: (delta: number, mark: boolean) => void;
@@ -230,6 +448,8 @@ interface AppState {
   askMkdir: () => void;
   askMkfile: () => void;
   askAbout: () => void;
+  setFolderApp: (enabled: boolean) => Promise<void>;
+  openLaunchedFolder: (path: string, side?: Side) => Promise<void>;
   askRename: () => void;
   askPattern: () => void;
   askZip: () => void;
@@ -262,6 +482,8 @@ interface AppState {
   setIconTint: (id: string, color: string | null) => void;
   resetIconTints: () => void;
   toggleTerminal: () => void;
+  expandTerminal: () => void;
+  restoreTerminal: () => void;
   toggleKeyBar: () => void;
   toggleScrollLock: () => void;
   setSplit: (split: number) => void;
@@ -274,6 +496,7 @@ interface AppState {
   setOutputOpen: (open: boolean) => void;
   onCmd: (chunk: CmdChunk) => void;
   onTransfer: (progress: TransferProgress) => void;
+  onListBatch: (batch: ListBatch) => void;
   setPalette: (open: boolean) => void;
   clearRecent: () => void;
   forgetRecent: (path: string) => void;
@@ -293,6 +516,7 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
   theme: "system",
+  pathStyle: "breadcrumb",
   active: "left",
   panels: { left: emptyPanel(), right: emptyPanel() },
   showHidden: false,
@@ -307,6 +531,8 @@ export const useApp = create<AppState>((set, get) => ({
   pins: [],
   clipboard: null,
   textpad: false,
+  folderAppSupported: false,
+  folderApp: false,
   command: "",
   commandHistory: [],
   commandCursor: -1,
@@ -316,6 +542,7 @@ export const useApp = create<AppState>((set, get) => ({
   running: false,
   runId: null,
   terminalOpen: false,
+  terminalExpanded: false,
   split: 0.5,
   outputHeight: 160,
   terminalHeight: 240,
@@ -332,6 +559,8 @@ export const useApp = create<AppState>((set, get) => ({
     let home = "";
     let places: Place[] = [];
     let textpad = false;
+    let folderAppSupported = false;
+    let folderApp = false;
     if (inTauri()) {
       try {
         home = await invoke<string>("home_dir");
@@ -340,11 +569,19 @@ export const useApp = create<AppState>((set, get) => ({
       } catch (error) {
         toast("error", message(error));
       }
+      try {
+        const status = await invoke<{ supported: boolean; enabled: boolean }>("folder_app_status");
+        folderAppSupported = status.supported;
+        folderApp = status.enabled;
+      } catch {
+        folderAppSupported = false;
+      }
     }
     setScrollLock(session.scrollLock);
     const listView = (view: ViewMode): Panel["listView"] => (view === "files" || view === "icons" ? view : "details");
     set({
       theme: session.theme,
+      pathStyle: session.pathStyle === "text" ? "text" : "breadcrumb",
       showHidden: session.showHidden,
       iconColors: session.iconColors,
       keyBar: session.keyBar,
@@ -361,6 +598,8 @@ export const useApp = create<AppState>((set, get) => ({
       pins: storedPins(session.pins, places),
       places,
       textpad,
+      folderAppSupported,
+      folderApp,
       panels: {
         left: {
           ...emptyPanel(),
@@ -382,6 +621,18 @@ export const useApp = create<AppState>((set, get) => ({
         },
       },
     });
+    let launch = "";
+    if (inTauri()) {
+      try {
+        launch = (await invoke<string | null>("take_launch_folder")) ?? "";
+      } catch {
+        launch = "";
+      }
+    }
+    if (externalFolder) {
+      launch = externalFolder;
+      externalFolder = "";
+    }
     const desktop = places.find((place) => place.role === "desktop")?.path || home;
     const resume: { side: Side; path: string; label: string }[] = [];
     let profiles: SftpProfile[] = [];
@@ -405,15 +656,22 @@ export const useApp = create<AppState>((set, get) => ({
       const shown = get().panels[side].path || desktop || home;
       set((state) => ({ panels: patch(state.panels, side, { history: [shown], historyAt: 0, viewHistory: [state.panels[side].view] }) }));
     };
-    await openSaved("left", session.leftPath);
+    await openSaved("left", launch || session.leftPath);
+    if (launch && get().panels.left.view === "preview") get().setView("left", get().panels.left.listView);
     await openSaved("right", session.rightPath);
     set({ ready: true, ...(resume.length ? { modal: { type: "sftpResume", items: resume } } : {}) });
+    if (externalFolder) {
+      const late = externalFolder;
+      externalFolder = "";
+      await get().openLaunchedFolder(late);
+    }
   },
 
   persist: async () => {
     const state = get();
     await writeSession({
       theme: state.theme,
+      pathStyle: state.pathStyle,
       leftPath: state.panels.left.path,
       rightPath: state.panels.right.path,
       leftView: state.panels.left.view,
@@ -483,53 +741,51 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setTheme: (theme) => set({ theme }),
+  setPathStyle: (pathStyle) => set({ pathStyle }),
   setActive: (side) => set({ active: side }),
   cyclePanel: (dir) => set({ active: dir === 1 ? "right" : "left" }),
 
   navigate: async (side, raw, record = true) => {
+    stopSearch(side);
     if (!inTauri()) {
       set((state) => ({ panels: patch(state.panels, side, { loading: false, error: "Open the FilePad window to browse this computer." }) }));
       return;
     }
-    set((state) => ({ panels: patch(state.panels, side, { loading: true, error: null }) }));
+    const id = beginList(side, "open", record);
+    const before = get().panels[side];
+    const shown = raw.trim() || before.path;
+    if (before.view === "preview" && before.path && pathKey(shown) !== pathKey(before.path)) {
+      const back = before.savedView !== "preview" ? before.savedView : before.listView;
+      get().setView(side, back);
+    }
+    set((state) => ({
+      panels: patch(state.panels, side, {
+        loading: true,
+        error: null,
+        path: shown,
+        entries: pathKey(shown) === pathKey(before.path) ? before.entries : [],
+        cursor: 0,
+        anchor: 0,
+        marked: [],
+      }),
+    }));
     try {
-      const listing = await invoke<DirListing>("list_dir", { path: raw });
-      const recent = [listing.path, ...get().recent.filter((item) => item !== listing.path)].slice(0, 12);
-      set((state) => {
-        const panel = state.panels[side];
-        let history = panel.history;
-        let historyAt = panel.historyAt;
-        let viewHistory = panel.viewHistory ?? [];
-        if (record && history[historyAt]?.toLowerCase() !== listing.path.toLowerCase()) {
-          const prior = viewHistory.length === history.length ? viewHistory : history.map(() => panel.view);
-          history = [...history.slice(0, historyAt + 1), listing.path].slice(-48);
-          viewHistory = [...prior.slice(0, historyAt + 1), panel.view].slice(-48);
-          historyAt = history.length - 1;
-        }
-        return {
-          recent,
-          panels: patch(state.panels, side, {
-            path: listing.path,
-            parent: listing.parent,
-            entries: listing.entries,
-            cursor: 0,
-            anchor: 0,
-            marked: [],
-            filter: "",
-            loading: false,
-            error: null,
-            treeKids: {},
-            treeExpanded: [],
-            history,
-            historyAt,
-            viewHistory,
-            localPath: isRemotePath(listing.path) ? panel.localPath : listing.path,
-          }),
-        };
-      });
+      const listing = await invoke<DirListing>("list_dir", { path: raw, id });
+      if (listActive[side] !== id) return;
+      const job = listJobs.get(id);
+      if (job) job.settled = true;
+      if (!job?.opened) applyOpen(side, listing, record, false);
+      else settleOpen(side, listing, job.pinned);
+      listJobs.delete(id);
       if (get().panels[side].view === "tree") await get().ensureTree(side, listing.path);
     } catch (error) {
-      set((state) => ({ panels: patch(state.panels, side, { loading: false, error: message(error) }) }));
+      listJobs.delete(id);
+      if (listStopped(side, id, error)) return;
+      set((state) => ({
+        panels: patch(state.panels, side, state.panels[side].path === shown
+          ? { loading: false, error: message(error), path: before.path, entries: before.entries, cursor: before.cursor, anchor: before.anchor, marked: before.marked }
+          : { loading: false, error: message(error) }),
+      }));
       toast("error", message(error));
     }
   },
@@ -540,12 +796,13 @@ export const useApp = create<AppState>((set, get) => ({
     const path = panel.history[next];
     if (!path) return;
     const view = panel.viewHistory?.[next];
+    const leavingPreview = panel.view === "preview";
     const before = panel.path;
     await get().navigate(side, path, false);
     const after = get().panels[side].path;
     if (after.toLowerCase() === before.toLowerCase() && after.toLowerCase() !== path.toLowerCase()) return;
     set((state) => ({ panels: patch(state.panels, side, { historyAt: next }) }));
-    if (view && view !== get().panels[side].view) get().setView(side, view);
+    if (view && view !== get().panels[side].view && !(leavingPreview && view === "preview")) get().setView(side, view);
   },
 
   refresh: async (side) => {
@@ -554,19 +811,38 @@ export const useApp = create<AppState>((set, get) => ({
     const currentName = panel.view === "tree"
       ? treeRows(panel, get().showHidden)[panel.cursor]?.name
       : fileRows(panel, get().showHidden)[panel.cursor]?.name;
+    const id = beginList(side, "refresh", false);
     try {
-      const listing = await invoke<DirListing>("list_dir", { path: panel.path });
+      const listing = await invoke<DirListing>("list_dir", { path: panel.path, id });
+      if (listActive[side] !== id) return;
+      const job = listJobs.get(id);
+      if (job) job.settled = true;
+      listJobs.delete(id);
       set((state) => {
         const marked = state.panels[side].marked.filter((path) => listing.entries.some((entry) => entry.path === path));
-        const next: Panel = { ...state.panels[side], parent: listing.parent, entries: listing.entries, marked, loading: false, error: null, treeKids: {}, treeExpanded: [] };
-        const list = next.view === "tree" ? [] : fileRows(next, state.showHidden);
+        const next: Panel = {
+          ...state.panels[side],
+          path: listing.path,
+          parent: listing.parent,
+          entries: listing.entries,
+          marked,
+          loading: false,
+          error: null,
+          treeKids: state.panels[side].view === "tree" ? { [listing.path]: listing.entries } : {},
+          treeExpanded: [],
+        };
+        const list = next.view === "tree" ? treeRows(next, state.showHidden) : fileRows(next, state.showHidden);
         const index = list.findIndex((row) => row.name === currentName);
         next.cursor = index >= 0 ? index : Math.min(next.cursor, Math.max(0, list.length - 1));
         next.anchor = next.cursor;
         return { panels: { ...state.panels, [side]: next } };
       });
       if (get().panels[side].view === "tree") await get().ensureTree(side, listing.path);
+      const next = get().panels[side];
+      if (next.filter.trim() && (next.searched.trim() || !hasLocalMatch(next, get().showHidden))) void runSearch(side, false);
     } catch (error) {
+      listJobs.delete(id);
+      if (listStopped(side, id, error)) return;
       toast("error", message(error));
     }
   },
@@ -576,7 +852,16 @@ export const useApp = create<AppState>((set, get) => ({
     await get().refresh("right");
   },
 
-  setFilter: (side, filter) => set((state) => ({ panels: patch(state.panels, side, { filter, cursor: 0, anchor: 0 }) })),
+  setFilter: (side, filter) => {
+    stopSearch(side);
+    set((state) => ({ panels: patch(state.panels, side, { filter, cursor: 0, anchor: 0, hits: [], searching: false, searched: "", searchLimited: false, searchCap: 0 }) }));
+    if (filter.trim()) scheduleSearch(side);
+  },
+
+  searchDeeper: (side) => {
+    if (!get().panels[side].filter.trim()) return;
+    void runSearch(side, true);
+  },
 
   setView: (side, view) => {
     if (get().panels[side].view === view) return;
@@ -727,7 +1012,7 @@ export const useApp = create<AppState>((set, get) => ({
   ensureTree: async (side, path) => {
     if (!path || !inTauri() || get().panels[side].treeKids[path]) return;
     try {
-      const listing = await invoke<DirListing>("list_dir", { path });
+      const listing = await invoke<DirListing>("list_dir", { path, id: 0 });
       set((state) => ({
         panels: patch(state.panels, side, { treeKids: { ...state.panels[side].treeKids, [path]: listing.entries } }),
       }));
@@ -804,22 +1089,25 @@ export const useApp = create<AppState>((set, get) => ({
       toast("warning", "Choose a destination folder.");
       return;
     }
-    set({ transfer: { done: 0, total: 0, current: "Starting" } });
+    const label = mode === "copy" ? "Copying" : "Moving";
+    set({ transfer: { done: 0, total: 0, current: "Starting", label } });
+    startTransferJob(`${label}…`);
     try {
       const command = mode === "copy" ? "copy_paths" : "move_paths";
       const result = await invoke<TransferResult>(command, { sources, destDir: dest, overwrite });
       if (result.conflicts.length) {
         const transfer: PendingTransfer = { mode, sources, dest, note };
+        cancelTransferJob();
         set({ transfer: null, modal: { type: "overwrite", transfer, conflicts: result.conflicts } });
         return;
       }
       if (mode === "cut") set({ clipboard: null });
       set({ transfer: null, modal: null });
-      toast("success", note ?? (mode === "copy" ? "Copied." : "Moved."));
+      finishTransferJob("success", note ?? (mode === "copy" ? "Copied." : "Moved."));
       await get().refreshBoth();
     } catch (error) {
       set({ transfer: null });
-      toast("error", message(error));
+      finishTransferJob("error", message(error));
       await get().refreshBoth();
     }
   },
@@ -854,6 +1142,24 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   askAbout: () => set({ contextMenu: null, paletteOpen: false, modal: { type: "about" } }),
+
+  setFolderApp: async (enabled) => {
+    try {
+      await invoke("set_folder_app", { enabled });
+      set({ folderApp: enabled });
+      toast("success", enabled ? "Folders open in FilePad." : "Folders open in File Explorer.");
+    } catch (error) {
+      toast("error", message(error));
+    }
+  },
+
+  openLaunchedFolder: async (path, side) => {
+    const target = side ?? get().active;
+    const panel = get().panels[target];
+    if (panel.view === "preview") get().setView(target, panel.listView);
+    set({ active: target });
+    await get().navigate(target, path);
+  },
 
   askRename: () => {
     const found = selectionSources(get());
@@ -967,15 +1273,16 @@ export const useApp = create<AppState>((set, get) => ({
       return;
     }
     if (archives.length) {
-      set({ contextMenu: null, transfer: { done: 0, total: 0, current: "Extracting" } });
+      set({ contextMenu: null, transfer: { done: 0, total: 0, current: "Extracting", label: "Extracting" } });
+      startTransferJob("Extracting…");
       try {
         await invoke<string[]>("extract_archives", { archives, destDir: dest });
         set({ transfer: null });
-        toast("success", "Extracted.");
+        finishTransferJob("success", "Extracted.");
         await get().refreshBoth();
       } catch (error) {
         set({ transfer: null });
-        toast("error", message(error));
+        finishTransferJob("error", message(error));
         await get().refreshBoth();
       }
       return;
@@ -1073,15 +1380,16 @@ export const useApp = create<AppState>((set, get) => ({
     if (!trimmed) return;
     const file = trimmed.toLowerCase().endsWith(".zip") ? trimmed : `${trimmed}.zip`;
     const dest = joinPath(get().panels[modal.side].path, file);
+    const job = jobStart("Creating zip…");
     try {
       await invoke("zip_paths", { sources: modal.paths, dest });
       set({ modal: null });
-      toast("success", "Zip created.");
+      jobFinish(job, "success", "Zip created.");
       await get().refresh(modal.side);
       const index = fileRows(get().panels[modal.side], get().showHidden).findIndex((row) => row.name.toLowerCase() === file.toLowerCase());
       if (index >= 0) set((state) => ({ panels: patch(state.panels, modal.side, { cursor: index, anchor: index }) }));
     } catch (error) {
-      toast("error", message(error));
+      jobFinish(job, "error", message(error));
     }
   },
 
@@ -1094,16 +1402,18 @@ export const useApp = create<AppState>((set, get) => ({
     }
     const { paths, side } = modal;
     set({ modal: null, transfer: { done: 0, total: paths.length, current: "pictures", label: "Converting" } });
+    startTransferJob("Converting…");
     try {
       const result = await invoke<ConvertReport>("convert_images", { paths, format, quality, background, replace });
       set({ transfer: null });
-      if (result.written) toast("success", result.written === 1 ? "Converted 1 picture." : `Converted ${result.written} pictures.`);
-      if (result.skipped) toast("warning", result.reason ? `Skipped ${result.skipped}. ${result.reason}` : `Skipped ${result.skipped}.`);
-      if (!result.written && !result.skipped) toast("warning", "Nothing to convert.");
+      if (result.written) finishTransferJob("success", result.written === 1 ? "Converted 1 picture." : `Converted ${result.written} pictures.`);
+      else if (result.skipped) finishTransferJob("warning", result.reason ? `Skipped ${result.skipped}. ${result.reason}` : `Skipped ${result.skipped}.`);
+      else finishTransferJob("warning", "Nothing to convert.");
+      if (result.written && result.skipped) toast("warning", result.reason ? `Skipped ${result.skipped}. ${result.reason}` : `Skipped ${result.skipped}.`);
       await get().refresh(side);
     } catch (error) {
       set({ transfer: null });
-      toast("error", message(error));
+      finishTransferJob("error", message(error));
     }
   },
 
@@ -1213,7 +1523,15 @@ export const useApp = create<AppState>((set, get) => ({
     holdScrollSync();
     set((state) => ({ panels: patch(state.panels, side, { iconSize: iconColumnsOf(size) }) }));
   },
-  toggleHidden: () => set((state) => ({ showHidden: !state.showHidden })),
+  toggleHidden: () => {
+    set((state) => ({ showHidden: !state.showHidden }));
+    const showHidden = get().showHidden;
+    for (const side of ["left", "right"] as const) {
+      const panel = get().panels[side];
+      if (!panel.filter.trim()) continue;
+      if (panel.searched.trim() || !hasLocalMatch(panel, showHidden)) void runSearch(side, false);
+    }
+  },
   toggleIconColors: () => set((state) => ({ iconColors: !state.iconColors })),
   askColors: () => set({ paletteOpen: false, contextMenu: null, modal: { type: "colors" } }),
   setIconTint: (id, color) => set((state) => {
@@ -1224,7 +1542,9 @@ export const useApp = create<AppState>((set, get) => ({
     return { iconTints };
   }),
   resetIconTints: () => set({ iconTints: {} }),
-  toggleTerminal: () => set((state) => ({ terminalOpen: !state.terminalOpen })),
+  toggleTerminal: () => set((state) => ({ terminalOpen: !state.terminalOpen, terminalExpanded: state.terminalOpen ? false : state.terminalExpanded })),
+  expandTerminal: () => set({ terminalOpen: true, terminalExpanded: true }),
+  restoreTerminal: () => set({ terminalExpanded: false }),
   toggleKeyBar: () => set((state) => ({ keyBar: !state.keyBar })),
   toggleScrollLock: () => {
     const scrollLock = !get().scrollLock;
@@ -1296,7 +1616,43 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  onTransfer: (transfer) => set({ transfer }),
+  onListBatch: (batch) => {
+    const job = listJobs.get(batch.id);
+    if (!job || job.settled || listActive[job.side] !== batch.id) return;
+    if (job.mode === "refresh") {
+      set((state) => {
+        const panel = state.panels[job.side];
+        const entries = batch.seq === 0 ? batch.entries : panel.entries.concat(batch.entries);
+        const treeKids = panel.view === "tree" ? { ...panel.treeKids, [batch.path]: entries } : panel.treeKids;
+        return { panels: patch(state.panels, job.side, { path: batch.path, parent: batch.parent, entries, treeKids, loading: !batch.done, error: null }) };
+      });
+      return;
+    }
+    const listing: DirListing = { path: batch.path, parent: batch.parent, entries: batch.entries };
+    if (!job.opened) {
+      job.opened = true;
+      applyOpen(job.side, listing, job.record, !batch.done);
+      return;
+    }
+    const state = get();
+    const panel = state.panels[job.side];
+    if (panel.cursor > 0) {
+      const row = fileRows(panel, state.showHidden)[panel.cursor];
+      if (row && !row.up) job.pinned = row.path;
+    }
+    appendListed(job.side, batch, job.pinned);
+  },
+
+  onTransfer: (incoming) => {
+    const label = incoming.label ?? get().transfer?.label;
+    const transfer = { ...incoming, label };
+    set({ transfer });
+    if (!transferJob) return;
+    const ratio = transfer.total > 0 ? Math.min(1, transfer.done / transfer.total) : null;
+    const head = ratio == null ? `${label ?? "Copying"}…` : `${label ?? "Copying"} ${Math.round(ratio * 100)}%`;
+    const name = transfer.current && transfer.current !== "Starting" ? transfer.current : "";
+    jobUpdate(transferJob, ratio, name ? `${head} · ${name}` : head);
+  },
   setPalette: (paletteOpen) => set({ paletteOpen }),
 
   clearRecent: () => set({ recent: [] }),

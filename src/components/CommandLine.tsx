@@ -1,6 +1,6 @@
 import { Play, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { diskFolder, shortPath } from "../lib/format";
+import { diskFolder, displayPath, isRemotePath, shortPath } from "../lib/format";
 import { useApp } from "../stores/appStore";
 import { dragHeight } from "./DragBar";
 
@@ -16,13 +16,15 @@ export function CommandLine() {
   const outputHeight = useApp((state) => state.outputHeight);
   const setOutputHeight = useApp((state) => state.setOutputHeight);
   const setOutputOpen = useApp((state) => state.setOutputOpen);
-  const path = diskFolder(useApp((state) => state.panels[state.active].path));
+  const here = useApp((state) => state.panels[state.active].path);
+  const profiles = useApp((state) => state.sftpProfiles);
+  const path = isRemotePath(here) ? displayPath(here, profiles) : shortPath(diskFolder(here));
   const box = useRef<HTMLPreElement>(null);
   useEffect(() => {
     if (box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [output]);
   return (
-    <div className="min-w-0 shrink-0 overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
+    <div className="fp-chrome min-w-0 shrink-0 overflow-hidden border-t border-[var(--border)] bg-[var(--bg)]">
       {outputOpen && output && (
         <div className="relative">
           <div

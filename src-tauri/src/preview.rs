@@ -1,10 +1,12 @@
 use crate::{docs, gzipnav, slides, zipnav};
 use base64::Engine;
-use image::{ImageFormat, ImageReader, Limits};
+use image::{ImageFormat, ImageReader};
 use serde::Serialize;
+use std::cell::Cell;
 use std::fs::{self, File};
-use std::io::{Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_PREVIEW: u64 = 8 * 1024 * 1024;
 const MAX_IMAGE: u64 = 80 * 1024 * 1024;
@@ -33,8 +35,40 @@ pub struct Preview {
     pub poster_base64: Option<String>,
 }
 
+static PREVIEW_GEN: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static PREVIEW_TICKET: Cell<u64> = const { Cell::new(0) };
+}
+
+struct PreviewScope;
+
+impl PreviewScope {
+    fn enter() -> Self {
+        let ticket = PREVIEW_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        PREVIEW_TICKET.set(ticket);
+        Self
+    }
+}
+
+impl Drop for PreviewScope {
+    fn drop(&mut self) {
+        PREVIEW_TICKET.set(0);
+    }
+}
+
+fn live() -> Result<(), String> {
+    let ticket = PREVIEW_TICKET.get();
+    if ticket == 0 || PREVIEW_GEN.load(Ordering::Relaxed) == ticket {
+        Ok(())
+    } else {
+        Err("cancelled".into())
+    }
+}
+
 pub fn preview_file(raw: &str) -> Result<Preview, String> {
+    let _scope = PreviewScope::enter();
     if crate::sftpnav::is_remote(raw) {
+        live()?;
         let extension = extension_tail(raw);
         let limit = if is_deck(&extension) { u64::MAX } else { MAX_PREVIEW };
         let loaded = crate::sftpnav::read_capped(raw, limit)?;
@@ -44,9 +78,11 @@ pub fn preview_file(raw: &str) -> Result<Preview, String> {
         return preview_bytes(raw, &loaded.name, loaded.size, loaded.data, loaded.truncated);
     }
     if let Some((archive, inner)) = zipnav::split(raw) {
+        live()?;
         return preview_zip(&archive, &inner, raw.trim());
     }
     if let Some((archive, inner)) = gzipnav::split(raw) {
+        live()?;
         return preview_gz(&archive, &inner, raw.trim());
     }
     let path = Path::new(raw.trim());
@@ -66,8 +102,14 @@ pub fn preview_file(raw: &str) -> Result<Preview, String> {
         return Ok(item);
     }
     if kind == "image" && fast_enough(&extension, size) {
-        if let Ok((jpeg, width, height)) = fast_jpeg(path) {
-            return Ok(scaled_image(&name, raw.trim(), size, &extension, jpeg, width, height));
+        live()?;
+        match fast_jpeg(path) {
+            Ok((jpeg, width, height)) => {
+                live()?;
+                return Ok(scaled_image(&name, raw.trim(), size, &extension, jpeg, width, height));
+            }
+            Err(err) if err == "cancelled" => return Err(err),
+            Err(_) => {}
         }
         if size > MAX_IMAGE {
             return Ok(shell("too-large", &name, raw.trim(), size, &extension));
@@ -83,24 +125,33 @@ pub fn preview_file(raw: &str) -> Result<Preview, String> {
         if size > MAX_PREVIEW {
             return Ok(shell(kind, &name, raw.trim(), size, &extension));
         }
+        live()?;
         let bytes = fs::read(path).map_err(|err| format!("Can't read that file: {err}"))?;
+        live()?;
         return finish(kind, &name, raw.trim(), size, &extension, bytes, false);
     }
     if kind == "document" {
         if document_byte_limit(&extension).is_some_and(|limit| size > limit) {
             return Ok(shell("too-large", &name, raw.trim(), size, &extension));
         }
+        live()?;
         let bytes = fs::read(path).map_err(|err| format!("Can't read that file: {err}"))?;
+        live()?;
         return document_preview(&name, raw.trim(), size, &extension, &bytes);
     }
     if kind == "image" && size > MAX_PREVIEW {
+        live()?;
         let bytes = fs::read(path).map_err(|err| format!("Can't read that file: {err}"))?;
+        live()?;
         return Ok(shrunk_image(&name, raw.trim(), size, &extension, &bytes));
     }
+    live()?;
     let file = File::open(path).map_err(|err| format!("Can't read that file: {err}"))?;
     let mut bytes = Vec::new();
     file.take(MAX_PREVIEW).read_to_end(&mut bytes).map_err(|err| format!("Can't read that file: {err}"))?;
-    finish(kind, &name, raw.trim(), size, &extension, bytes, size > MAX_PREVIEW)
+    let preview = finish(kind, &name, raw.trim(), size, &extension, bytes, size > MAX_PREVIEW)?;
+    live()?;
+    Ok(preview)
 }
 
 fn preview_bytes(raw: &str, name: &str, size: u64, bytes: Vec<u8>, truncated: bool) -> Result<Preview, String> {
@@ -113,23 +164,23 @@ fn preview_bytes(raw: &str, name: &str, size: u64, bytes: Vec<u8>, truncated: bo
     finish(kind, name, raw, size, &extension, bytes, truncated)
 }
 
-pub fn save_image(raw: &str, quarters: i32, flip_h: bool, flip_v: bool) -> Result<(), String> {
+pub fn save_image(raw: &str, quarters: i32, flip_h: bool, flip_v: bool, tone: &str, spots: &[crate::convert::BlurSpot], strength: f32) -> Result<String, String> {
     if crate::sftpnav::is_remote(raw) {
         return Err("Copy the picture to this computer before saving a change.".into());
     }
     if zipnav::split(raw).is_some() || gzipnav::split(raw).is_some() {
         return Err("Copy the picture out of the archive before saving a change.".into());
     }
-    if quarters.rem_euclid(4) == 0 && !flip_h && !flip_v {
-        return Ok(());
+    let plain = tone != "bw" && tone != "sepia";
+    if quarters.rem_euclid(4) == 0 && !flip_h && !flip_v && plain && spots.is_empty() {
+        return Ok(raw.trim().to_string());
     }
     let path = Path::new(raw.trim());
     let extension = extension_of(path);
     if extension == "svg" {
         return Err("SVG pictures stay as they are.".into());
     }
-    let bytes = fs::read(path).map_err(|err| format!("Can't read that picture: {err}"))?;
-    let mut image = decode_image(&bytes)?;
+    let mut image = crate::convert::load_path(path)?;
     image = match quarters.rem_euclid(4) {
         1 => image.rotate90(),
         2 => image.rotate180(),
@@ -142,8 +193,23 @@ pub fn save_image(raw: &str, quarters: i32, flip_h: bool, flip_v: bool) -> Resul
     if flip_v {
         image = image.flipv();
     }
-    image.save(path).map_err(|err| format!("Can't save that picture: {err}"))?;
-    Ok(())
+    image = crate::convert::restyle(image, tone, spots, strength);
+    crate::convert::save_edit(path, &image)
+}
+
+pub fn save_text(raw: &str, text: &str) -> Result<String, String> {
+    if crate::sftpnav::is_remote(raw) {
+        return Err("Copy the file to this computer before saving a change.".into());
+    }
+    if zipnav::split(raw).is_some() || gzipnav::split(raw).is_some() {
+        return Err("Copy the file out of the archive before saving a change.".into());
+    }
+    let path = Path::new(raw.trim());
+    if !path.is_file() {
+        return Err("That file is not on this computer.".into());
+    }
+    fs::write(path, text.as_bytes()).map_err(|err| format!("Can't save that file. {err}"))?;
+    Ok(raw.trim().to_string())
 }
 
 fn preview_gz(archive: &Path, inner: &str, raw: &str) -> Result<Preview, String> {
@@ -449,13 +515,7 @@ fn image_size(bytes: &[u8]) -> (u32, u32) {
 }
 
 fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
-    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|err| err.to_string())?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(32_000);
-    limits.max_image_height = Some(32_000);
-    limits.max_alloc = Some(1024 * 1024 * 1024);
-    reader.limits(limits);
-    reader.decode().map_err(|_| "That picture is too large to preview.".to_string())
+    crate::convert::load_image(bytes).map_err(|_| "That picture is too large to preview.".to_string())
 }
 
 fn shell(kind: &str, name: &str, path: &str, size: u64, extension: &str) -> Preview {
@@ -477,19 +537,53 @@ fn shell(kind: &str, name: &str, path: &str, size: u64, extension: &str) -> Prev
     }
 }
 
-fn attach_cover_file(item: &mut Preview, path: &Path) {
-    let Ok(mut file) = File::open(path) else { return };
-    let mut header = [0u8; 10];
-    if file.read_exact(&mut header).is_err() || &header[0..3] != b"ID3" {
-        return;
+pub(crate) struct TrackCard {
+    pub title: String,
+    pub artist: String,
+    pub cover: Option<(String, Vec<u8>)>,
+}
+
+pub(crate) fn track_card(path: &Path) -> TrackCard {
+    let fallback = path.file_stem().and_then(|name| name.to_str()).filter(|name| !name.is_empty()).unwrap_or("Audio").to_string();
+    let Some(bytes) = id3_file(path) else {
+        return TrackCard { title: fallback, artist: String::new(), cover: None };
+    };
+    let tags = id3_tags(&bytes);
+    TrackCard {
+        title: tags.title.filter(|title| !title.is_empty()).unwrap_or(fallback),
+        artist: tags.artist.unwrap_or_default(),
+        cover: tags.cover.map(|(mime, image)| fit_cover(mime, image)),
     }
-    let Some(size) = synchsafe(&header[6..10]) else { return };
-    let take = (size as usize).min(8 * 1024 * 1024);
+}
+
+fn fit_cover(mime: String, image: Vec<u8>) -> (String, Vec<u8>) {
+    if image.len() > PREVIEW_ORIGINAL as usize {
+        if let Ok((jpeg, _, _)) = shrink_jpeg(&image) {
+            return ("image/jpeg".to_string(), jpeg);
+        }
+    }
+    (mime, image)
+}
+
+fn id3_file(path: &Path) -> Option<Vec<u8>> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 10];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..3] != b"ID3" {
+        return None;
+    }
+    let size = synchsafe(&header[6..10])? as usize;
+    let take = size.min(8 * 1024 * 1024);
     let mut body = vec![0u8; take];
-    let Ok(read) = file.read(&mut body) else { return };
+    let read = file.read(&mut body).ok()?;
     body.truncate(read);
     let mut tagged = header.to_vec();
     tagged.extend(body);
+    Some(tagged)
+}
+
+fn attach_cover_file(item: &mut Preview, path: &Path) {
+    let Some(tagged) = id3_file(path) else { return };
     attach_cover_bytes(item, &tagged);
 }
 
@@ -507,15 +601,29 @@ fn attach_cover_bytes(item: &mut Preview, bytes: &[u8]) {
     item.poster_base64 = Some(base64::engine::general_purpose::STANDARD.encode(image));
 }
 
+struct Id3Tags {
+    cover: Option<(String, Vec<u8>)>,
+    title: Option<String>,
+    artist: Option<String>,
+}
+
 fn id3_cover(file: &[u8]) -> Option<(String, Vec<u8>)> {
+    id3_tags(file).cover
+}
+
+fn id3_tags(file: &[u8]) -> Id3Tags {
+    let empty = Id3Tags { cover: None, title: None, artist: None };
     if file.len() < 10 || &file[0..3] != b"ID3" {
-        return None;
+        return empty;
     }
     let version = file[3];
     if version != 2 && version != 3 && version != 4 {
-        return None;
+        return empty;
     }
-    let size = synchsafe(&file[6..10])? as usize;
+    let size = match synchsafe(&file[6..10]) {
+        Some(size) => size as usize,
+        None => return empty,
+    };
     let end = 10 + size.min(file.len().saturating_sub(10));
     let mut body = file[10..end].to_vec();
     if file[5] & 0x80 != 0 {
@@ -523,20 +631,33 @@ fn id3_cover(file: &[u8]) -> Option<(String, Vec<u8>)> {
     }
     let header = if version == 2 { 6 } else { 10 };
     let mut best: Option<(u8, String, Vec<u8>)> = None;
+    let mut title = None;
+    let mut artist = None;
     let mut index = 0;
     while index + header <= body.len() {
         if body[index] == 0 {
             break;
         }
-        let (picture, data_size, format_flag) = if version == 2 {
-            (&body[index..index + 3] == b"PIC", read_be(&body[index + 3..index + 6])?, 0u8)
+        let (id, data_size, format_flag) = if version == 2 {
+            let id = std::str::from_utf8(&body[index..index + 3]).unwrap_or("");
+            (id, match read_be(&body[index + 3..index + 6]) {
+                Some(size) => size,
+                None => break,
+            }, 0u8)
         } else {
+            let id = std::str::from_utf8(&body[index..index + 4]).unwrap_or("");
             let size = if version == 4 {
-                synchsafe(&body[index + 4..index + 8])? as usize
+                match synchsafe(&body[index + 4..index + 8]) {
+                    Some(size) => size as usize,
+                    None => break,
+                }
             } else {
-                read_be(&body[index + 4..index + 8])?
+                match read_be(&body[index + 4..index + 8]) {
+                    Some(size) => size,
+                    None => break,
+                }
             };
-            (&body[index..index + 4] == b"APIC", size, body[index + 9])
+            (id, size, body[index + 9])
         };
         let start = index + header;
         let Some(frame_end) = start.checked_add(data_size) else { break };
@@ -545,9 +666,7 @@ fn id3_cover(file: &[u8]) -> Option<(String, Vec<u8>)> {
         }
         let frame = body[start..frame_end].to_vec();
         index = frame_end;
-        if !picture {
-            continue;
-        }
+        let id = id.to_string();
         let compressed = if version == 4 { format_flag & 0x08 != 0 } else { format_flag & 0x80 != 0 };
         let encrypted = if version == 4 { format_flag & 0x04 != 0 } else { format_flag & 0x40 != 0 };
         if compressed || encrypted {
@@ -560,15 +679,63 @@ fn id3_cover(file: &[u8]) -> Option<(String, Vec<u8>)> {
         if version == 4 && format_flag & 0x01 != 0 && data.len() >= 4 {
             data.drain(0..4);
         }
-        let Some((rank, mime, bytes)) = parse_picture(version, &data) else { continue };
-        if best.as_ref().is_none_or(|(old, _, _)| rank < *old) {
-            best = Some((rank, mime, bytes));
-        }
-        if rank == 0 {
-            break;
+        if id == "APIC" || id == "PIC" {
+            let Some((rank, mime, bytes)) = parse_picture(version, &data) else { continue };
+            if best.as_ref().is_none_or(|(old, _, _)| rank < *old) {
+                best = Some((rank, mime, bytes));
+            }
+        } else if (id == "TIT2" || id == "TT2") && title.is_none() {
+            title = frame_text(&data);
+        } else if (id == "TPE1" || id == "TP1") && artist.is_none() {
+            artist = frame_text(&data);
         }
     }
-    best.map(|(_, mime, bytes)| (mime, bytes))
+    Id3Tags { cover: best.map(|(_, mime, bytes)| (mime, bytes)), title, artist }
+}
+
+fn frame_text(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let raw = &data[1..];
+    let text = match data[0] {
+        0 => {
+            let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
+            raw[..end].iter().map(|byte| char::from(*byte)).collect()
+        }
+        1 => utf16_text(raw, true),
+        2 => utf16_text(raw, false),
+        3 => {
+            let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
+            String::from_utf8_lossy(&raw[..end]).into_owned()
+        }
+        _ => return None,
+    };
+    let text = text.trim_matches(['\0', ' ']).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn utf16_text(raw: &[u8], bom: bool) -> String {
+    let (big, body) = if bom && raw.len() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE {
+        (false, &raw[2..])
+    } else if bom && raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
+        (true, &raw[2..])
+    } else if bom {
+        (false, raw)
+    } else {
+        (true, raw)
+    };
+    let mut units = Vec::new();
+    let mut index = 0;
+    while index + 1 < body.len() {
+        if body[index] == 0 && body[index + 1] == 0 {
+            break;
+        }
+        let unit = if big { u16::from_be_bytes([body[index], body[index + 1]]) } else { u16::from_le_bytes([body[index], body[index + 1]]) };
+        units.push(unit);
+        index += 2;
+    }
+    String::from_utf16_lossy(&units)
 }
 
 fn parse_picture(version: u8, data: &[u8]) -> Option<(u8, String, Vec<u8>)> {
@@ -688,7 +855,7 @@ fn extension_of(path: &Path) -> String {
 
 fn kind_for(ext: &str) -> &'static str {
     match ext {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => "image",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "bmp" | "ico" => "image",
         "pdf" => "pdf",
         "csv" | "tsv" => "csv",
         "docx" => "docx",
@@ -708,9 +875,94 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|byte| *byte == 0)
 }
 
+fn read_orientation(path: &Path) -> image::metadata::Orientation {
+    use image::ImageDecoder;
+    let Ok(file) = File::open(path) else {
+        return image::metadata::Orientation::NoTransforms;
+    };
+    let Ok(reader) = ImageReader::new(BufReader::new(file)).with_guessed_format() else {
+        return image::metadata::Orientation::NoTransforms;
+    };
+    let Ok(mut decoder) = reader.into_decoder() else {
+        return image::metadata::Orientation::NoTransforms;
+    };
+    decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms)
+}
+
+fn orient_preview(rgb: Vec<u8>, width: u32, height: u32, full_w: u32, full_h: u32, orientation: image::metadata::Orientation) -> (Vec<u8>, u32, u32, u32, u32) {
+    use image::{DynamicImage, RgbImage};
+    if orientation == image::metadata::Orientation::NoTransforms {
+        return (rgb, width, height, full_w, full_h);
+    }
+    let pixels = (width as usize).saturating_mul(height as usize).saturating_mul(3);
+    if rgb.len() != pixels {
+        return (rgb, width, height, full_w, full_h);
+    }
+    let Some(buffer) = RgbImage::from_raw(width, height, rgb) else {
+        return (Vec::new(), width, height, full_w, full_h);
+    };
+    let mut image = DynamicImage::ImageRgb8(buffer);
+    image.apply_orientation(orientation);
+    let swapped = matches!(
+        orientation,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    );
+    let turned = image.to_rgb8();
+    let tw = turned.width();
+    let th = turned.height();
+    let (full_w, full_h) = if swapped { (full_h, full_w) } else { (full_w, full_h) };
+    (turned.into_raw(), tw, th, full_w, full_h)
+}
+
+#[cfg(windows)]
+pub fn wic_image(path: &Path) -> Result<image::DynamicImage, String> {
+    let (rgb, width, height, _, _) = read_wic(path, 32_000)?;
+    let buffer = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| "Can't read that picture.".to_string())?;
+    let mut image = image::DynamicImage::ImageRgb8(buffer);
+    image.apply_orientation(read_orientation(path));
+    Ok(image)
+}
+
+pub(crate) fn icon_jpeg(path: &Path, edge: u32) -> Result<Vec<u8>, String> {
+    #[cfg(windows)]
+    {
+        use image::ImageEncoder;
+        let (rgb, tw, th, width, height) = read_wic(path, edge)?;
+        let orientation = read_orientation(path);
+        let (rgb, tw, th, _, _) = orient_preview(rgb, tw, th, width, height, orientation);
+        let mut out = Cursor::new(Vec::new());
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 75)
+            .write_image(&rgb, tw, th, image::ExtendedColorType::Rgb8)
+            .map_err(|_| "No picture for that file.".to_string())?;
+        return Ok(out.into_inner());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, edge);
+        Err("No picture for that file.".into())
+    }
+}
+
 #[cfg(windows)]
 fn fast_jpeg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
     use image::ImageEncoder;
+    live()?;
+    let (rgb, tw, th, width, height) = read_wic(path, PREVIEW_EDGE)?;
+    let orientation = read_orientation(path);
+    let (rgb, tw, th, width, height) = orient_preview(rgb, tw, th, width, height, orientation);
+    let mut out = Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(&rgb, tw, th, image::ExtendedColorType::Rgb8)
+        .map_err(|_| "That picture is too large to preview.".to_string())?;
+    Ok((out.into_inner(), width, height))
+}
+
+#[cfg(windows)]
+fn read_wic(path: &Path, max_edge: u32) -> Result<(Vec<u8>, u32, u32, u32, u32), String> {
+    live()?;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::Graphics::Imaging::{
@@ -736,12 +988,12 @@ fn fast_jpeg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
             return Err("Can't read that picture.".into());
         }
         let long = width.max(height);
-        let (tw, th) = if long <= PREVIEW_EDGE {
+        let (tw, th) = if long <= max_edge {
             (width, height)
         } else {
             (
-                ((width as u64 * PREVIEW_EDGE as u64) / long as u64).max(1) as u32,
-                ((height as u64 * PREVIEW_EDGE as u64) / long as u64).max(1) as u32,
+                ((width as u64 * max_edge as u64) / long as u64).max(1) as u32,
+                ((height as u64 * max_edge as u64) / long as u64).max(1) as u32,
             )
         };
         let scaler = factory.CreateBitmapScaler().map_err(|_| "Can't read that picture.".to_string())?;
@@ -766,11 +1018,7 @@ fn fast_jpeg(path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
                 rgb.push(row[index]);
             }
         }
-        let mut out = Cursor::new(Vec::new());
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
-            .write_image(&rgb, tw, th, image::ExtendedColorType::Rgb8)
-            .map_err(|_| "That picture is too large to preview.".to_string())?;
-        Ok((out.into_inner(), width, height))
+        Ok((rgb, tw, th, width, height))
     }
 }
 
@@ -781,7 +1029,7 @@ fn fast_jpeg(_path: &Path) -> Result<(Vec<u8>, u32, u32), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::id3_cover;
+    use super::id3_tags;
 
     #[test]
     fn slide_decks_are_not_refused_for_size() {
@@ -823,9 +1071,22 @@ mod tests {
             (size & 0x7f) as u8,
         ]);
         file.extend(body);
-        let (mime, image) = id3_cover(&file).expect("cover");
+        let tags = id3_tags(&file);
+        assert_eq!(tags.title.as_deref(), Some("A"));
+        let (mime, image) = tags.cover.expect("cover");
         assert_eq!(mime, "image/jpeg");
         assert!(image.starts_with(&[0xFF, 0xD8, 0xFF]));
         assert!(image.len() > 32);
+    }
+
+    #[test]
+    fn save_text_writes_the_same_file() {
+        let path = std::env::temp_dir().join(format!("filepad-text-{}.txt", std::process::id()));
+        std::fs::write(&path, "hello").unwrap();
+        let saved = super::save_text(&path.to_string_lossy(), "hello\r\nthere").unwrap();
+        assert_eq!(saved, path.to_string_lossy());
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello\r\nthere");
+        assert!(super::save_text("zip:archive.zip|note.txt", "nope").is_err());
+        let _ = std::fs::remove_file(path);
     }
 }

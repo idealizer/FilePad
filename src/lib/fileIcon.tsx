@@ -68,8 +68,18 @@ export function useIconColor(isDir: boolean, extension: string): string | undefi
   return iconColor(isDir, extension, tints);
 }
 
-export function FileIcon({ isDir, extension, up }: { isDir: boolean; extension: string; up?: boolean }) {
-  const color = useIconColor(isDir || Boolean(up), extension);
+function phosphorShade(isDir: boolean, extension: string, up?: boolean): string {
+  if (up || isDir) return "#9ecf86";
+  if (programs.includes(extension) || code.includes(extension)) return "#7aaa62";
+  if (images.includes(extension) || audio.includes(extension) || video.includes(extension)) return "#5c8a4e";
+  if (archives.includes(extension)) return "#4d7344";
+  return "#6a9955";
+}
+
+export function FileIcon({ isDir, extension, up, paint }: { isDir: boolean; extension: string; up?: boolean; paint?: string }) {
+  const theme = useApp((state) => state.theme);
+  const auto = useIconColor(isDir || Boolean(up), extension);
+  const color = paint ?? (theme === "green" ? phosphorShade(isDir, extension, up) : auto);
   const style: CSSProperties | undefined = color ? { color } : undefined;
   if (up) return <FolderUp style={style} />;
   if (isDir) return <Folder style={style} />;

@@ -94,15 +94,16 @@ function focusFilePanel(store: ReturnType<typeof useApp.getState>) {
   if (panel && document.activeElement !== panel) panel.focus();
 }
 
-function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" | "glass" {
-  if (theme === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  return theme;
+function resolveTheme(theme: ThemeMode): "light" | "dark" | "retro" | "green" {
+  if (theme === "dark" || theme === "retro" || theme === "light" || theme === "green") return theme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 export default function App() {
   const boot = useApp((state) => state.boot);
   const persist = useApp((state) => state.persist);
   const theme = useApp((state) => state.theme);
+  const chrome = useApp((state) => state.chrome);
   const pathStyle = useApp((state) => state.pathStyle);
   const ready = useApp((state) => state.ready);
   const leftPath = useApp((state) => state.panels.left.path);
@@ -131,6 +132,7 @@ export default function App() {
   const pins = useApp((state) => state.pins);
   const resolved = resolveTheme(theme);
   document.documentElement.dataset.theme = resolved;
+  document.documentElement.dataset.chrome = chrome;
 
   useEffect(() => {
     void boot();
@@ -154,7 +156,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, pathStyle, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
+  }, [ready, persist, theme, chrome, pathStyle, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
 
   useEffect(() => {
     if (!inTauri()) return;

@@ -78,7 +78,7 @@ export function CodeView({ text, path, source, extension, truncated, theme, live
   useEffect(() => {
     const node = host.current;
     if (!node || !colored) return;
-    const dark = theme === "dark" || theme === "glass" || theme === "retro" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const dark = theme === "dark" || theme === "retro" || theme === "green" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
     const breaks = text.includes("\r\n") && !text.replace(/\r\n/g, "").includes("\n") ? EditorState.lineSeparator.of("\r\n") : [];
     const view = new EditorView({
       parent: node,
@@ -103,7 +103,7 @@ export function CodeView({ text, path, source, extension, truncated, theme, live
             ...(canEdit ? {} : { ".cm-cursor": { display: "none" } }),
             "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": { backgroundColor: "var(--selection)" },
           }, { dark }),
-          syntaxHighlighting(dark ? oneDarkHighlightStyle : defaultHighlightStyle, { fallback: true }),
+          theme === "green" ? [] : syntaxHighlighting(dark ? oneDarkHighlightStyle : defaultHighlightStyle, { fallback: true }),
           languageFor(extension),
           extension === "log" ? logLines : [],
         ],

@@ -2990,8 +2990,18 @@ function ListingView({ listPath, source, archive, noun = "in this folder" }: { l
         <span className="text-xs text-[var(--muted)]">{visible.length} items {noun}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className={drag.widths ? "fp-table fp-cols" : "fp-table"} onPointerDown={drag.onPointerDown} onPointerMove={drag.onPointerMove}>
-          {drag.widths && <colgroup>{drag.widths.map((width, index) => <col key={index} style={{ width }} />)}</colgroup>}
+        <table className={drag.widths ? "fp-table fp-listing fp-cols" : "fp-table fp-listing"} onPointerDown={drag.onPointerDown} onPointerMove={drag.onPointerMove}>
+          <colgroup>
+            {(drag.widths ?? [0, 88, 148, 88]).map((width, index) => <col key={index} style={width ? { width } : undefined} />)}
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Size</th>
+              <th>Modified</th>
+              <th>Type</th>
+            </tr>
+          </thead>
           <tbody>
             {shown.map((entry) => (
               <tr key={entry.path}>

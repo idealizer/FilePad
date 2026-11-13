@@ -1,6 +1,7 @@
 export type Side = "left" | "right";
 export type ViewMode = "files" | "details" | "icons" | "tree" | "preview";
-export type ThemeMode = "light" | "dark" | "glass" | "system" | "retro";
+export type ThemeMode = "light" | "dark" | "system" | "retro" | "green";
+export type ChromeMode = "classic" | "modern";
 export type PathStyle = "breadcrumb" | "text";
 export type SortKey = "name" | "size" | "modified" | "type";
 export type ToastKind = "success" | "error" | "warning";

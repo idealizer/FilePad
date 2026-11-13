@@ -1,10 +1,11 @@
-import type { NavPin, PathStyle, ThemeMode, ViewMode } from "../types";
+import type { ChromeMode, NavPin, PathStyle, ThemeMode, ViewMode } from "../types";
 import { ICON_COLUMNS_DEFAULT } from "./iconSize";
 import type { NameTemplate } from "./names";
 import { inTauri } from "./platform";
 
 export interface SessionData {
   theme: ThemeMode;
+  chrome?: ChromeMode;
   pathStyle?: PathStyle;
   leftPath: string;
   rightPath: string;
@@ -38,6 +39,7 @@ const FALLBACK = "filepad-session";
 export function defaultSession(): SessionData {
   return {
     theme: "system",
+    chrome: "classic",
     pathStyle: "breadcrumb",
     leftPath: "",
     rightPath: "",
@@ -66,6 +68,14 @@ export function defaultSession(): SessionData {
   };
 }
 
+function savedLook(saved: Partial<SessionData> | null | undefined): { theme: ThemeMode; chrome: ChromeMode } {
+  const raw = saved?.theme as string | undefined;
+  const glass = raw === "glass";
+  const theme: ThemeMode = raw === "light" || raw === "dark" || raw === "retro" || raw === "green" || raw === "system" ? raw : glass ? "dark" : "system";
+  const chrome: ChromeMode = saved?.chrome === "modern" || saved?.chrome === "classic" ? saved.chrome : glass ? "modern" : "classic";
+  return { theme, chrome };
+}
+
 function withIconSizes(saved: Partial<SessionData> | null | undefined, merged: SessionData): SessionData {
   const legacy = typeof saved?.iconSize === "number" ? saved.iconSize : merged.iconSize;
   return {
@@ -81,12 +91,12 @@ export async function readSession(): Promise<SessionData> {
     if (!inTauri()) {
       const raw = localStorage.getItem(FALLBACK);
       const saved = raw ? (JSON.parse(raw) as Partial<SessionData>) : null;
-      return withIconSizes(saved, { ...defaults, ...(saved ?? {}) });
+      return { ...withIconSizes(saved, { ...defaults, ...(saved ?? {}) }), ...savedLook(saved) };
     }
     const { load } = await import("@tauri-apps/plugin-store");
     const store = await load("settings.json", { autoSave: true, defaults: {} });
     const saved = await store.get<Partial<SessionData>>("session");
-    return withIconSizes(saved, { ...defaults, ...(saved ?? {}) });
+    return { ...withIconSizes(saved, { ...defaults, ...(saved ?? {}) }), ...savedLook(saved) };
   } catch {
     return defaults;
   }

@@ -86,7 +86,7 @@ function AboutDialog() {
       <p className="mt-2 text-sm">A two-panel file commander.</p>
       <p className="mt-3 text-sm text-[var(--muted)]">by Content Factory OÜ</p>
       <h3 className="mt-4 text-sm font-semibold">Path bar</h3>
-      <p className="mt-1 text-sm text-[var(--muted)]">Breadcrumb shows each folder. The arrow next to a folder lists the folders inside it. Click the empty end of the bar to type a path. Text shows the path as a line.</p>
+      <p className="mt-1 text-sm text-[var(--muted)]">Breadcrumb shows each folder. Point at a folder name, or the arrow beside it, to list the folders inside it. Click the empty end of the bar to type a path. Text shows the path as a line.</p>
       <div className="fp-switch mt-3" role="group" aria-label="Path bar">
         <button type="button" data-active={pathStyle === "breadcrumb"} onClick={() => setPathStyle("breadcrumb")}>Breadcrumb</button>
         <button type="button" data-active={pathStyle === "text"} onClick={() => setPathStyle("text")}>Text</button>
@@ -190,7 +190,7 @@ function Swatch({ id, name, color, custom, onChange, onReset }: { id: string; na
   const shown = /^#[0-9a-fA-F]{6}$/.test(color) ? color : defaultIconColor(id);
   return (
     <div className="flex items-center gap-2 px-2 py-1">
-      <span className="inline-flex" style={{ color: shown }}><FileIcon isDir={id === "folder"} extension={id} /></span>
+      <span className="inline-flex" style={{ color: shown }}><FileIcon isDir={id === "folder"} extension={id} paint={shown} /></span>
       <span className="w-16 truncate text-sm">{name}</span>
       <input className="fp-color" type="color" aria-label={`${name} color`} value={shown} onChange={(event) => onChange(event.target.value)} />
       <span className="w-16 font-mono text-xs text-[var(--muted)]">{shown}</span>

@@ -6,7 +6,7 @@ import { fileRows, hasLocalMatch, treeRows } from "../lib/rows";
 import { alignScroll, holdScrollSync, setScrollLock } from "../lib/scrollLock";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
 import { readSession, writeSession } from "../lib/session";
-import type { Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, ListBatch, McpTool, ModalState, NavPin, Panel, PathStyle, PendingTransfer, Place, SearchListing, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
+import type { ChromeMode, Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, ListBatch, McpTool, ModalState, NavPin, Panel, PathStyle, PendingTransfer, Place, SearchListing, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
 import { jobCancel, jobFinish, jobStart, jobUpdate, toast } from "./toastStore";
 
 let deleting = false;
@@ -371,6 +371,7 @@ function storedTemplates(value: NameTemplate[] | undefined): NameTemplate[] {
 interface AppState {
   ready: boolean;
   theme: ThemeMode;
+  chrome: ChromeMode;
   pathStyle: PathStyle;
   active: Side;
   panels: { left: Panel; right: Panel };
@@ -416,6 +417,7 @@ interface AppState {
   unpinPath: (path: string) => void;
   movePin: (from: number, to: number) => void;
   setTheme: (theme: ThemeMode) => void;
+  setChrome: (chrome: ChromeMode) => void;
   setPathStyle: (pathStyle: PathStyle) => void;
   setActive: (side: Side) => void;
   cyclePanel: (dir: 1 | -1) => void;
@@ -516,6 +518,7 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
   theme: "system",
+  chrome: "classic",
   pathStyle: "breadcrumb",
   active: "left",
   panels: { left: emptyPanel(), right: emptyPanel() },
@@ -581,6 +584,7 @@ export const useApp = create<AppState>((set, get) => ({
     const listView = (view: ViewMode): Panel["listView"] => (view === "files" || view === "icons" ? view : "details");
     set({
       theme: session.theme,
+      chrome: session.chrome === "modern" ? "modern" : "classic",
       pathStyle: session.pathStyle === "text" ? "text" : "breadcrumb",
       showHidden: session.showHidden,
       iconColors: session.iconColors,
@@ -671,6 +675,7 @@ export const useApp = create<AppState>((set, get) => ({
     const state = get();
     await writeSession({
       theme: state.theme,
+      chrome: state.chrome,
       pathStyle: state.pathStyle,
       leftPath: state.panels.left.path,
       rightPath: state.panels.right.path,
@@ -741,6 +746,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setTheme: (theme) => set({ theme }),
+  setChrome: (chrome) => set({ chrome }),
   setPathStyle: (pathStyle) => set({ pathStyle }),
   setActive: (side) => set({ active: side }),
   cyclePanel: (dir) => set({ active: dir === 1 ? "right" : "left" }),

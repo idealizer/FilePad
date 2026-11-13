@@ -134,6 +134,15 @@ pub fn list_dir(app: &AppHandle, raw: &str, id: u64) -> Result<DirListing, Strin
     result
 }
 
+/// Folders only, for the breadcrumb menu. A full listing of every file keeps
+/// that menu, and the pane behind it, on "Reading…".
+pub fn list_subdirs(app: &AppHandle, raw: &str) -> Result<Vec<DirEntry>, String> {
+    let listing = list_dir_inner(app, raw, 0)?;
+    let mut dirs: Vec<DirEntry> = listing.entries.into_iter().filter(|entry| entry.is_dir).collect();
+    dirs.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    Ok(dirs)
+}
+
 fn list_dir_inner(app: &AppHandle, raw: &str, id: u64) -> Result<DirListing, String> {
     if list_cancelled(id) {
         return Err("cancelled".into());

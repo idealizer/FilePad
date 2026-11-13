@@ -1,20 +1,55 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+let crumbClaim = 0;
+
 export function Dropdown({
   button,
   children,
   align = "start",
   menuClass = "",
+  hover = false,
+  onOpen,
 }: {
   button: (props: { open: boolean; toggle: () => void }) => ReactNode;
   children: (close: () => void) => ReactNode;
   align?: "start" | "end";
   menuClass?: string;
+  hover?: boolean;
+  onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const id = useRef(0);
+  const closeTimer = useRef(0);
+  if (id.current === 0) id.current = ++crumbClaim;
+  const cancelClose = () => window.clearTimeout(closeTimer.current);
+  const openHover = () => {
+    if (!hover) return;
+    cancelClose();
+    window.dispatchEvent(new CustomEvent("fp-crumb-claim", { detail: id.current }));
+    onOpen?.();
+    setOpen(true);
+  };
+  const scheduleClose = () => {
+    if (!hover) return;
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => setOpen(false), 180);
+  };
+  useEffect(() => {
+    if (!hover) return;
+    const onClaim = (event: Event) => {
+      if ((event as CustomEvent<number>).detail === id.current) return;
+      cancelClose();
+      setOpen(false);
+    };
+    window.addEventListener("fp-crumb-claim", onClaim);
+    return () => {
+      window.removeEventListener("fp-crumb-claim", onClaim);
+      cancelClose();
+    };
+  }, [hover]);
   useLayoutEffect(() => {
     const node = menu.current;
     const host = root.current;
@@ -69,10 +104,16 @@ export function Dropdown({
     };
   }, [open]);
   return (
-    <div ref={root} className="relative inline-flex">
-      {button({ open, toggle: () => setOpen((value) => !value) })}
+    <div ref={root} className="relative inline-flex items-center gap-px" onMouseEnter={openHover} onMouseLeave={scheduleClose}>
+      {button({ open, toggle: () => (hover ? openHover() : setOpen((value) => !value)) })}
       {open && createPortal(
-        <div ref={menu} className={menuClass ? `menu ${menuClass}` : "menu"} style={{ position: "fixed", visibility: "hidden" }}>
+        <div
+          ref={menu}
+          className={menuClass ? `menu ${menuClass}` : "menu"}
+          style={{ position: "fixed", visibility: "hidden" }}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+        >
           {children(() => setOpen(false))}
         </div>,
         document.body,

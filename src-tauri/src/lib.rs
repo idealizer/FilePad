@@ -51,6 +51,11 @@ async fn list_dir(app: tauri::AppHandle, path: String, id: u64) -> Result<fsops:
 }
 
 #[tauri::command]
+async fn list_subdirs(app: tauri::AppHandle, path: String) -> Result<Vec<fsops::DirEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || fsops::list_subdirs(&app, &path)).await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
 fn cancel_list(id: u64) {
     fsops::cancel_list(id);
 }
@@ -460,39 +465,78 @@ fn monitor_at(app: &tauri::AppHandle, x: i32, y: i32) -> Option<tauri::Monitor> 
     })
 }
 
-/// The window is created hidden. Showing a maximized window from its restored
-/// size makes Windows draw that smaller window first and then grow it.
+/// The window is created hidden. One placement call shows it at its final
+/// size. Maximizing or resizing first makes Windows paint a second, smaller
+/// window and then close it.
 #[cfg(windows)]
-fn show_maximized(window: &tauri::WebviewWindow) {
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, SetWindowPlacement, SW_SHOWMAXIMIZED, WINDOWPLACEMENT};
-    let Ok(hwnd) = window.hwnd() else { return };
+fn reveal_main_window(app: &tauri::AppHandle) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, SetWindowPlacement, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT};
+    let Some(window) = app.get_webview_window("main") else { return };
+    let saved = saved_window(app);
+    let Ok(hwnd) = window.hwnd() else {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    };
     unsafe {
         let mut place = WINDOWPLACEMENT::default();
         place.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        if GetWindowPlacement(hwnd, &mut place).is_ok() {
-            place.showCmd = SW_SHOWMAXIMIZED.0 as u32;
-            let _ = SetWindowPlacement(hwnd, &place);
+        if GetWindowPlacement(hwnd, &mut place).is_err() {
+            let _ = window.show();
+            let _ = window.set_focus();
+            return;
+        }
+        let (x, y, width, height, maximized) = match saved.as_ref() {
+            Some(state) => {
+                let width = if state.width >= 860 { state.width } else { 1280 };
+                let height = if state.height >= 520 { state.height } else { 840 };
+                if state.maximized {
+                    let monitor = monitor_at(app, state.x, state.y).or_else(|| app.primary_monitor().ok().flatten());
+                    let origin = monitor.map(|item| item.work_area().position).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
+                    (origin.x, origin.y, width, height, true)
+                } else if monitor_at(app, state.x, state.y).is_some() {
+                    (state.x, state.y, width, height, false)
+                } else {
+                    let origin = centered(app, width, height).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
+                    (origin.x, origin.y, width, height, false)
+                }
+            }
+            None => {
+                let origin = centered(app, 1280, 840).unwrap_or(tauri::PhysicalPosition::new(0, 0));
+                (origin.x, origin.y, 1280, 840, false)
+            }
+        };
+        place.rcNormalPosition = RECT { left: x, top: y, right: x + width as i32, bottom: y + height as i32 };
+        place.showCmd = if maximized { SW_SHOWMAXIMIZED.0 as u32 } else { SW_SHOWNORMAL.0 as u32 };
+        if SetWindowPlacement(hwnd, &place).is_err() {
+            let _ = window.show();
         }
     }
+    let _ = window.set_focus();
 }
 
+#[cfg(windows)]
+fn centered(app: &tauri::AppHandle, width: u32, height: u32) -> Option<tauri::PhysicalPosition<i32>> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let area = monitor.work_area();
+    let x = area.position.x + ((area.size.width as i32 - width as i32) / 2).max(0);
+    let y = area.position.y + ((area.size.height as i32 - height as i32) / 2).max(0);
+    Some(tauri::PhysicalPosition::new(x, y))
+}
+
+#[cfg(not(windows))]
 fn reveal_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     let saved = saved_window(app);
     if saved.as_ref().is_some_and(|state| state.maximized) {
         let monitor = saved.as_ref().and_then(|state| monitor_at(app, state.x, state.y)).or_else(|| app.primary_monitor().ok().flatten());
-        // Mark it maximized while it is still hidden, then give it the screen's
-        // size so the first paint is already full. The plugin ignores size
-        // changes once the window is maximized, so this does not become the
-        // restored size.
         let _ = window.maximize();
         if let Some(monitor) = monitor {
             let area = monitor.work_area();
             let _ = window.set_position(tauri::PhysicalPosition::new(area.position.x, area.position.y));
             let _ = window.set_size(tauri::PhysicalSize::new(area.size.width, area.size.height));
         }
-        #[cfg(windows)]
-        show_maximized(&window);
     } else if let Some(state) = saved {
         if state.width >= 860 && state.height >= 520 {
             let _ = window.set_size(tauri::PhysicalSize::new(state.width, state.height));
@@ -559,6 +603,7 @@ pub fn run() {
             home_dir,
             list_places,
             list_dir,
+            list_subdirs,
             cancel_list,
             cancel_search,
             search_dir,

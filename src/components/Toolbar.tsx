@@ -1,4 +1,4 @@
-import { AppWindow, ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderOpen, FolderPlus, Ghost, Keyboard, Link2, Minus, Monitor, Moon, Palette, Pencil, Plus, Square, Sun, Terminal, Trash2, Unlink, X } from "lucide-react";
+import { AppWindow, ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderOpen, FolderPlus, Ghost, Keyboard, Link2, Minus, Monitor, Moon, Palette, Pencil, Plus, Square, SquareTerminal, Sun, Terminal, Trash2, Unlink, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { inTauri, isWindows, keys } from "../lib/platform";
 import { useApp } from "../stores/appStore";
@@ -59,14 +59,16 @@ function WindowCaption() {
 const themes: { id: ThemeMode; label: string; icon: ReactNode }[] = [
   { id: "light", label: "Light", icon: <Sun /> },
   { id: "dark", label: "Dark", icon: <Moon /> },
-  { id: "glass", label: "Glass", icon: <AppWindow /> },
   { id: "retro", label: "Retro", icon: <Columns2 /> },
+  { id: "green", label: "Green", icon: <SquareTerminal /> },
   { id: "system", label: "System", icon: <Monitor /> },
 ];
 
 export function Toolbar() {
   const theme = useApp((state) => state.theme);
   const setTheme = useApp((state) => state.setTheme);
+  const chrome = useApp((state) => state.chrome);
+  const setChrome = useApp((state) => state.setChrome);
   const showHidden = useApp((state) => state.showHidden);
   const toggleHidden = useApp((state) => state.toggleHidden);
   const iconColors = useApp((state) => state.iconColors);
@@ -176,6 +178,7 @@ export function Toolbar() {
       </button>
       <button className="tb-btn" data-tip={`Commands (${keys("Ctrl+K")})`} onClick={() => setPalette(true)}><Command /></button>
       <button className="tb-btn" data-tip={`${current.label}. Switch to ${next.label}`} onClick={() => setTheme(next.id)}>{current.icon}</button>
+      <button className="tb-btn" data-active={chrome === "modern"} data-tip={chrome === "modern" ? "Modern. Switch to Classic" : "Classic. Switch to Modern"} onClick={() => setChrome(chrome === "modern" ? "classic" : "modern")}><AppWindow /></button>
       {caption && <span className="tb-sep" />}
       {caption && <WindowCaption />}
     </header>

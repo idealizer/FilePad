@@ -1,9 +1,9 @@
 import { ChevronRight, Folder, HardDrive, House } from "lucide-react";
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { displayPath, pathCrumbs, pathKey, storePath } from "../lib/format";
 import { invoke, isTyping, message } from "../lib/platform";
 import { useApp } from "../stores/appStore";
-import type { DirListing, Entry, Side } from "../types";
+import type { Entry, Side } from "../types";
 import { Dropdown, MenuItem } from "./Menu";
 
 export function PathBar({ side }: { side: Side }) {
@@ -125,18 +125,7 @@ export function PathBar({ side }: { side: Side }) {
       )}
       <CrumbMenu side={side} label="Places and drives" kind="places" />
       {crumbs.map((crumb, index) => (
-        <Fragment key={crumb.path}>
-          <button
-            type="button"
-            className="fp-crumb"
-            data-current={index === crumbs.length - 1}
-            title={crumb.name}
-            onClick={() => { setActive(side); void navigate(side, crumb.path); }}
-          >
-            <span>{crumb.name}</span>
-          </button>
-          <CrumbMenu side={side} label={`Folders in ${crumb.name}`} path={crumb.path} />
-        </Fragment>
+        <CrumbMenu key={crumb.path} side={side} label={`Folders in ${crumb.name}`} path={crumb.path} name={crumb.name} current={index === crumbs.length - 1} />
       ))}
       <div
         className="fp-crumb-rest"
@@ -151,23 +140,40 @@ export function PathBar({ side }: { side: Side }) {
   );
 }
 
-function CrumbMenu({ side, label, path, kind = "folders" }: { side: Side; label: string; path?: string; kind?: "places" | "folders" }) {
+function CrumbMenu({ side, label, path, name, current = false, kind = "folders" }: { side: Side; label: string; path?: string; name?: string; current?: boolean; kind?: "places" | "folders" }) {
   const loadPlaces = useApp((state) => state.loadPlaces);
+  const navigate = useApp((state) => state.navigate);
+  const setActive = useApp((state) => state.setActive);
   return (
     <Dropdown
+      hover
+      onOpen={() => {
+        if (kind === "places") void loadPlaces();
+      }}
       button={({ open, toggle }) => (
-        <button
-          type="button"
-          className="fp-crumb-sep"
-          data-active={open}
-          aria-label={label}
-          onClick={() => {
-            if (kind === "places") void loadPlaces();
-            toggle();
-          }}
-        >
-          <ChevronRight />
-        </button>
+        <>
+          {name && path && (
+            <button
+              type="button"
+              className="fp-crumb"
+              data-current={current}
+              data-active={open}
+              title={name}
+              onClick={() => { setActive(side); void navigate(side, path); }}
+            >
+              <span>{name}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="fp-crumb-sep"
+            data-active={open}
+            aria-label={label}
+            onClick={toggle}
+          >
+            <ChevronRight />
+          </button>
+        </>
       )}
     >
       {(close) => (kind === "places" ? <PlacesMenu side={side} close={close} /> : <FolderMenu side={side} path={path ?? ""} close={close} />)}
@@ -213,19 +219,25 @@ function FolderMenu({ side, path, close }: { side: Side; path: string; close: ()
     request.current = id;
     setRows(null);
     setError("");
-    void invoke<DirListing>("list_dir", { path, id: 0 })
-      .then((listing) => {
-        if (request.current !== id) return;
-        const dirs = listing.entries.filter((entry) => entry.isDir && (showHidden || !entry.hidden));
-        dirs.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
-        setRows(dirs);
-      })
-      .catch((reason: unknown) => {
-        if (request.current === id) setError(message(reason));
-      });
+    const timer = window.setTimeout(() => {
+      void invoke<Entry[]>("list_subdirs", { path })
+        .then((entries) => {
+          if (request.current !== id) return;
+          const dirs = entries.filter((entry) => showHidden || !entry.hidden);
+          dirs.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+          setRows(dirs);
+        })
+        .catch((reason: unknown) => {
+          if (request.current === id) setError(message(reason));
+        });
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      request.current += 1;
+    };
   }, [path, showHidden]);
   if (error) return <div className="menu-label">{error}</div>;
-  if (!rows) return <div className="menu-label">Loading</div>;
+  if (!rows) return <div className="menu-label">Reading…</div>;
   if (!rows.length) return <div className="menu-label">No folders</div>;
   return (
     <>

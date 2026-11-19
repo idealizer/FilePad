@@ -7,6 +7,7 @@ import { KeyBar } from "./components/KeyBar";
 import { ModalHost } from "./components/Modal";
 import { Panel } from "./components/Panel";
 import { StatusBar } from "./components/StatusBar";
+import { TabBar } from "./components/TabBar";
 import { TerminalDrawer } from "./components/TerminalDrawer";
 import { ToastHost } from "./components/Toast";
 import { Toolbar } from "./components/Toolbar";
@@ -130,6 +131,7 @@ export default function App() {
   const leftNav = useApp((state) => state.leftNav);
   const rightNav = useApp((state) => state.rightNav);
   const pins = useApp((state) => state.pins);
+  const tabKey = useApp((state) => `${state.activeTab}:${state.tabs.map((tab) => `${tab.id}=${tab.name}`).join("|")}`);
   const resolved = resolveTheme(theme);
   document.documentElement.dataset.theme = resolved;
   document.documentElement.dataset.chrome = chrome;
@@ -156,7 +158,7 @@ export default function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => void persist(), 400);
     return () => window.clearTimeout(timer);
-  }, [ready, persist, theme, chrome, pathStyle, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins]);
+  }, [ready, persist, theme, chrome, pathStyle, leftPath, rightPath, leftView, rightView, showHidden, iconColors, leftIconSize, rightIconSize, keyBar, scrollLock, iconTints, leftHistoryAt, rightHistoryAt, recent, commandHistory, split, outputHeight, terminalHeight, nameTemplates, leftNav, rightNav, pins, tabKey]);
 
   useEffect(() => {
     if (!inTauri()) return;
@@ -266,8 +268,16 @@ export default function App() {
         }
         return;
       }
+      if (event.key === "Tab" && (event.ctrlKey || event.metaKey)) {
+        if (inTerminal(event.target)) return;
+        event.preventDefault();
+        if (isTyping(event.target)) return;
+        store.cycleTab(event.shiftKey ? -1 : 1);
+        return;
+      }
       if (event.key === "Tab") {
         if (inTerminal(event.target)) return;
+        if (event.target instanceof HTMLElement && event.target.closest(".fp-tab")) return;
         event.preventDefault();
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         store.cyclePanel(event.shiftKey ? -1 : 1);
@@ -304,6 +314,12 @@ export default function App() {
         return;
       }
       if (mod && key.toLowerCase() === "k") { event.preventDefault(); store.setPalette(true); return; }
+      if (mod && key.toLowerCase() === "w" && !event.repeat) {
+        if (typing || inTerminal(event.target) || store.tabs.length < 2) return;
+        event.preventDefault();
+        store.closeTab(store.activeTab);
+        return;
+      }
       if (mod && (key === "`" || event.code === "Backquote")) { event.preventDefault(); store.toggleTerminal(); return; }
       if (key === "Escape") {
         if (isTyping(event.target)) return;
@@ -358,6 +374,7 @@ export default function App() {
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-[var(--bg)] text-[var(--text)]">
       <Toolbar />
+      <TabBar />
       {!(terminalOpen && terminalExpanded) && <SplitPanels />}
       {!(terminalOpen && terminalExpanded) && <CommandLine />}
       <TerminalDrawer />

@@ -29,7 +29,7 @@ import type { Side, ThemeMode } from "../types";
 
 const COLOR_LIMIT = 750_000;
 
-export function CodeView({ text, path, source, extension, truncated, theme, liveRef }: { text: string; path: string; source: Side; extension: string; truncated: boolean; theme: ThemeMode; liveRef?: { current: (() => string) | null } }) {
+export function CodeView({ text, path, source, extension, truncated, theme, liveRef, active = true }: { text: string; path: string; source: Side; extension: string; truncated: boolean; theme: ThemeMode; liveRef?: { current: (() => string) | null }; active?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const saved = useRef(text);
@@ -115,6 +115,11 @@ export function CodeView({ text, path, source, extension, truncated, theme, live
       viewRef.current = null;
     };
   }, [text, extension, theme, colored, canEdit]);
+
+  useEffect(() => {
+    if (!active) return;
+    viewRef.current?.requestMeasure();
+  }, [active]);
 
   const saveButton = (
     <button type="button" className="tb-btn" disabled={!dirty || saving || !canEdit} data-tip={saveTip} style={canEdit && (dirty || saving) ? { color: "var(--accent)" } : undefined} onClick={save}>

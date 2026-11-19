@@ -27,6 +27,7 @@ const PreviewChromeContext = createContext<PreviewChrome>({
 
 let toolsBeside = true;
 const besideListeners = new Set<(value: boolean) => void>();
+let htmlPage = false;
 
 function useToolsBeside(): [boolean, (next: boolean) => void] {
   const [beside, setBeside] = useState(toolsBeside);
@@ -80,7 +81,12 @@ export function PreviewPane({ side }: { side: Side }) {
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
   const [tableOn, setTableOn] = useState(true);
-  const [pageOn, setPageOn] = useState(false);
+  const [, setPageRev] = useState(0);
+  const pageOn = htmlPage;
+  const setPageOn = (next: boolean) => {
+    htmlPage = next;
+    setPageRev((value) => value + 1);
+  };
   const [pageText, setPageText] = useState("");
   const htmlText = useRef<(() => string) | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -89,7 +95,7 @@ export function PreviewPane({ side }: { side: Side }) {
   if (tablePath !== filePath) {
     setTablePath(filePath);
     setTableOn(true);
-    setPageOn(false);
+    setPageText("");
   }
 
   useEffect(() => {
@@ -134,10 +140,10 @@ export function PreviewPane({ side }: { side: Side }) {
           <span className="min-w-0 flex-1 truncate">{row?.up ? "Parent folder of the other panel" : "Preview"}</span>
         )}
         {file && <span className="text-xs text-[var(--muted)]">{formatBytes(file.size)}</span>}
-        {(preview?.extension === "html" || preview?.extension === "htm") && preview.kind === "text" && (
+        {(file?.extension === "html" || file?.extension === "htm") && (
           <div className="seg" role="tablist" aria-label="HTML view">
-            <button data-active={!pageOn} data-tip="Code" onClick={() => setPageOn(false)}><Code />Code</button>
-            <button data-active={pageOn} data-tip="HTML" onClick={() => { setPageText(htmlText.current?.() ?? preview.text ?? ""); setPageOn(true); }}><AppWindow />HTML</button>
+            <button type="button" data-active={!pageOn} data-tip="Code" onClick={() => setPageOn(false)}><Code />Code</button>
+            <button type="button" data-active={pageOn} data-tip="HTML" onClick={() => { setPageText(htmlText.current?.() ?? preview?.text ?? ""); setPageOn(true); }}><AppWindow />HTML</button>
           </div>
         )}
         {preview?.kind === "csv" && (
@@ -261,10 +267,10 @@ function Body({ preview, source, theme, tableOn, pageOn, pageText, htmlText, onT
     if (!html) return <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} />;
     return (
       <div className="relative h-full min-h-0">
-        <div className={pageOn ? "invisible absolute inset-0" : "h-full min-h-0"} aria-hidden={pageOn}>
-          <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} liveRef={htmlText} />
+        <div className={pageOn ? "hidden" : "h-full min-h-0"}>
+          <CodeView key={preview.path} text={preview.text} path={preview.path} source={source} extension={preview.extension} truncated={preview.truncated} theme={theme} liveRef={htmlText} active={!pageOn} />
         </div>
-        {pageOn && <HtmlView text={pageText || preview.text} path={preview.path} truncated={preview.truncated} />}
+        {pageOn && <HtmlView key={preview.path} text={pageText || preview.text} path={preview.path} truncated={preview.truncated} />}
       </div>
     );
   }

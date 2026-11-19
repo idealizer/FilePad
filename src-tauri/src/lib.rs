@@ -323,6 +323,11 @@ async fn describe_items(paths: Vec<String>) -> Result<Vec<fsops::ItemDetails>, S
 }
 
 #[tauri::command]
+async fn measure_paths(paths: Vec<String>) -> Result<Vec<fsops::PathTally>, String> {
+    tauri::async_runtime::spawn_blocking(move || fsops::measure_paths(&paths)).await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn extract_archives(app: tauri::AppHandle, archives: Vec<String>, dest_dir: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || fsops::extract_archives(&app, &archives, &dest_dir))
         .await
@@ -465,13 +470,37 @@ fn monitor_at(app: &tauri::AppHandle, x: i32, y: i32) -> Option<tauri::Monitor> 
     })
 }
 
-/// The window is created hidden. One placement call shows it at its final
-/// size. Maximizing or resizing first makes Windows paint a second, smaller
-/// window and then close it.
+/// Windows 11 animates a hidden window from its creation size up to maximized,
+/// and the first frame then plays a close. The window is created hidden, moved
+/// to its final rectangle before it is shown, and desktop transitions are off
+/// for that first show.
+#[cfg(windows)]
+fn quiet_transitions(hwnd: windows::Win32::Foundation::HWND, disabled: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+    let value: i32 = i32::from(disabled);
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &value as *const i32 as *const core::ffi::c_void, std::mem::size_of::<i32>() as u32);
+    }
+}
+
+#[cfg(windows)]
+fn release_transitions(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let main = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(window) = main.get_webview_window("main") else { return };
+            let Ok(hwnd) = window.hwnd() else { return };
+            quiet_transitions(hwnd, false);
+        });
+    });
+}
+
 #[cfg(windows)]
 fn reveal_main_window(app: &tauri::AppHandle) {
     use windows::Win32::Foundation::RECT;
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, SetWindowPlacement, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, SetWindowPlacement, SetWindowPos, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, WINDOWPLACEMENT};
     let Some(window) = app.get_webview_window("main") else { return };
     let saved = saved_window(app);
     let Ok(hwnd) = window.hwnd() else {
@@ -479,40 +508,45 @@ fn reveal_main_window(app: &tauri::AppHandle) {
         let _ = window.set_focus();
         return;
     };
+    quiet_transitions(hwnd, true);
     unsafe {
         let mut place = WINDOWPLACEMENT::default();
         place.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         if GetWindowPlacement(hwnd, &mut place).is_err() {
-            let _ = window.show();
-            let _ = window.set_focus();
-            return;
-        }
-        let (x, y, width, height, maximized) = match saved.as_ref() {
-            Some(state) => {
-                let width = if state.width >= 860 { state.width } else { 1280 };
-                let height = if state.height >= 520 { state.height } else { 840 };
-                if state.maximized {
-                    let monitor = monitor_at(app, state.x, state.y).or_else(|| app.primary_monitor().ok().flatten());
-                    let origin = monitor.map(|item| item.work_area().position).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
-                    (origin.x, origin.y, width, height, true)
-                } else if monitor_at(app, state.x, state.y).is_some() {
-                    (state.x, state.y, width, height, false)
-                } else {
-                    let origin = centered(app, width, height).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
-                    (origin.x, origin.y, width, height, false)
+            false
+        } else {
+            let (x, y, width, height, maximized) = match saved.as_ref() {
+                Some(state) => {
+                    let width = if state.width >= 860 { state.width } else { 1280 };
+                    let height = if state.height >= 520 { state.height } else { 840 };
+                    if state.maximized {
+                        let monitor = monitor_at(app, state.x, state.y).or_else(|| app.primary_monitor().ok().flatten());
+                        let origin = monitor.map(|item| item.work_area().position).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
+                        (origin.x, origin.y, width, height, true)
+                    } else if monitor_at(app, state.x, state.y).is_some() {
+                        (state.x, state.y, width, height, false)
+                    } else {
+                        let origin = centered(app, width, height).unwrap_or(tauri::PhysicalPosition::new(state.x, state.y));
+                        (origin.x, origin.y, width, height, false)
+                    }
                 }
-            }
-            None => {
-                let origin = centered(app, 1280, 840).unwrap_or(tauri::PhysicalPosition::new(0, 0));
-                (origin.x, origin.y, 1280, 840, false)
-            }
-        };
-        place.rcNormalPosition = RECT { left: x, top: y, right: x + width as i32, bottom: y + height as i32 };
-        place.showCmd = if maximized { SW_SHOWMAXIMIZED.0 as u32 } else { SW_SHOWNORMAL.0 as u32 };
-        if SetWindowPlacement(hwnd, &place).is_err() {
-            let _ = window.show();
+                None => {
+                    let origin = centered(app, 1280, 840).unwrap_or(tauri::PhysicalPosition::new(0, 0));
+                    (origin.x, origin.y, 1280, 840, false)
+                }
+            };
+            // Move while hidden so the first visible frame is already the final size.
+            let _ = SetWindowPos(hwnd, None, x, y, width as i32, height as i32, SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+            place.rcNormalPosition = RECT { left: x, top: y, right: x + width as i32, bottom: y + height as i32 };
+            place.showCmd = if maximized { SW_SHOWMAXIMIZED.0 as u32 } else { SW_SHOWNORMAL.0 as u32 };
+            SetWindowPlacement(hwnd, &place).is_ok()
         }
-    }
+    };
+    // Placement can show the window while the toolkit still treats it as hidden.
+    // Maximize then hides it. show() records that the window is on screen.
+    let _ = window.show();
+    unsafe { let _ = windows::Win32::Graphics::Dwm::DwmFlush(); }
+    release_transitions(app);
     let _ = window.set_focus();
 }
 
@@ -639,6 +673,7 @@ pub fn run() {
             export_zip_entry,
             open_item,
             describe_items,
+            measure_paths,
             extract_archives,
             textpad_available,
             open_in_textpad,

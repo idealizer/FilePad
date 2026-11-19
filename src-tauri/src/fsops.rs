@@ -1118,19 +1118,9 @@ fn describe_one(raw: &str) -> Result<ItemDetails, String> {
     let name = path.file_name().map(|item| item.to_string_lossy().to_string()).unwrap_or_else(|| friendly(&path));
     let is_dir = meta.is_dir();
     let extension = if is_dir { String::new() } else { path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase() };
-    let mut files = 0u64;
-    let mut folders = 0u64;
-    if is_dir {
-        if let Ok(read) = fs::read_dir(&path) {
-            for item in read.flatten() {
-                match item.file_type() {
-                    Ok(kind) if kind.is_dir() => folders += 1,
-                    Ok(_) => files += 1,
-                    Err(_) => {}
-                }
-            }
-        }
-    }
+    let contents = if is_dir { contents_of(&path) } else { Contents::default() };
+    let mut files = contents.files;
+    let mut folders = contents.folders;
     let mut kind = kind_label(is_dir, &extension);
     let mut counted = is_dir;
     if !is_dir && crate::zipnav::is_zip_file(&path) {
@@ -1154,8 +1144,8 @@ fn describe_one(raw: &str) -> Result<ItemDetails, String> {
         name: name.clone(),
         kind,
         is_dir,
-        size: if is_dir { 0 } else { meta.len() },
-        size_known: !is_dir,
+        size: if is_dir { contents.size } else { meta.len() },
+        size_known: true,
         modified: modified_ms(&meta),
         created: time_ms(meta.created()),
         accessed: time_ms(meta.accessed()),
@@ -1541,6 +1531,62 @@ fn recycle(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathTally {
+    pub path: String,
+    pub size: u64,
+    pub files: u64,
+    pub folders: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Contents {
+    size: u64,
+    files: u64,
+    folders: u64,
+}
+
+/// Files and folders inside `path`, not counting `path` itself. Directory links are not followed.
+fn contents_of(path: &Path) -> Contents {
+    let mut tally = Contents::default();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = fs::read_dir(&dir) else { continue };
+        for item in read.flatten() {
+            let Ok(kind) = item.file_type() else { continue };
+            if kind.is_symlink() {
+                if let Ok(meta) = item.metadata() {
+                    if meta.is_file() {
+                        tally.size += meta.len();
+                        tally.files += 1;
+                    }
+                }
+                continue;
+            }
+            if kind.is_dir() {
+                tally.folders += 1;
+                stack.push(item.path());
+                continue;
+            }
+            tally.size += item.metadata().ok().map(|meta| meta.len()).unwrap_or(0);
+            tally.files += 1;
+        }
+    }
+    tally
+}
+
+pub fn measure_paths(paths: &[String]) -> Vec<PathTally> {
+    paths
+        .iter()
+        .map(|raw| {
+            let path = PathBuf::from(raw.trim());
+            let contents = contents_of(&path);
+            PathTally { path: raw.clone(), size: contents.size, files: contents.files, folders: contents.folders }
+        })
+        .collect()
+}
+
 fn measure(path: &Path) -> u64 {
     let Ok(meta) = fs::symlink_metadata(path) else { return 0 };
     if meta.file_type().is_symlink() {
@@ -1764,6 +1810,17 @@ mod tests {
         fs::write(dir.join("a.txt"), b"hi").unwrap();
         fs::write(dir.join("b.txt"), b"abcd").unwrap();
         assert_eq!(measure(&dir), 6);
+        let inside = contents_of(&dir);
+        assert_eq!(inside.size, 6);
+        assert_eq!(inside.files, 2);
+        assert_eq!(inside.folders, 0);
+        let nested = dir.join("sub");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("c.txt"), b"xyz").unwrap();
+        let inside = contents_of(&dir);
+        assert_eq!(inside.size, 9);
+        assert_eq!(inside.files, 3);
+        assert_eq!(inside.folders, 1);
         assert!(!copy_due(0, 0, 100));
         assert!(copy_due(1, 0, 100));
         assert!(!copy_due(300_000, 200_000, 100_000_000));

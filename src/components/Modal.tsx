@@ -223,6 +223,9 @@ function PropertiesDialog() {
   const item = items?.length === 1 ? items[0] : null;
   const knownCount = items?.filter((entry) => entry.sizeKnown).length ?? 0;
   const known = items?.reduce((sum, entry) => sum + (entry.sizeKnown ? entry.size : 0), 0) ?? 0;
+  const files = items?.reduce((sum, entry) => sum + (entry.isDir ? entry.files : 1), 0) ?? 0;
+  const selectedFolders = items?.filter((entry) => entry.isDir).length ?? 0;
+  const nestedFolders = items?.reduce((sum, entry) => sum + entry.folders, 0) ?? 0;
   const locations = items ? [...new Set(items.map((entry) => entry.location))] : [];
   return (
     <>
@@ -235,7 +238,7 @@ function PropertiesDialog() {
             <Property label="Name" value={item.name} />
             <Property label="Path" value={displayPath(item.path, profiles)} />
             <Property label="Type" value={item.kind} />
-            <Property label="Size" value={item.sizeKnown ? formatBytes(item.size) : "—"} />
+            <Property label="Size" value={item.sizeKnown ? sizeText(item.size) : "—"} />
             {item.counted && <Property label="Contains" value={contains(item)} />}
             <Property label="Modified" value={when(item.modified)} />
             <Property label="Created" value={when(item.created)} />
@@ -246,9 +249,9 @@ function PropertiesDialog() {
         {items && items.length > 1 && (
           <>
             <Property label="Items" value={`${items.length} selected`} />
-            <Property label="Files" value={String(items.filter((entry) => !entry.isDir).length)} />
-            <Property label="Folders" value={String(items.filter((entry) => entry.isDir).length)} />
-            <Property label="Size" value={knownCount ? formatBytes(known) : "—"} />
+            <Property label="Files" value={String(files)} />
+            <Property label="Folders" value={nestedFolders ? `${selectedFolders} selected, ${nestedFolders} inside` : String(selectedFolders)} />
+            <Property label="Size" value={knownCount ? sizeText(known) : "—"} />
             <Property label="Location" value={locations.length === 1 ? displayPath(locations[0], profiles) : "More than one folder"} />
           </>
         )}
@@ -258,6 +261,11 @@ function PropertiesDialog() {
       </div>
     </>
   );
+}
+
+function sizeText(bytes: number): string {
+  const exact = Math.max(0, Math.round(bytes)).toLocaleString();
+  return `${formatBytes(bytes)} (${exact} bytes)`;
 }
 
 function Property({ label, value }: { label: string; value: string }) {

@@ -26,6 +26,7 @@ export function CommandPalette() {
   const folderApp = useApp((state) => state.folderApp);
   const pathStyle = useApp((state) => state.pathStyle);
   const activePath = useApp((state) => state.panels[state.active].path);
+  const tabCount = useApp((state) => state.tabs.length);
   const [query, setQuery] = useState("");
   useEffect(() => {
     if (open) setQuery("");
@@ -35,6 +36,8 @@ export function CommandPalette() {
     { id: "move", label: "Move to the other panel", hint: "F6", run: () => void useApp.getState().moveToOther() },
     { id: "mkdir", label: "New folder", hint: "F7", run: () => useApp.getState().askMkdir() },
     { id: "mkfile", label: "New file", hint: "Shift+F7", run: () => useApp.getState().askMkfile() },
+    { id: "new-tab", label: "New tab", run: () => void useApp.getState().newTab() },
+    { id: "close-tab", label: "Close tab", hint: keys("Ctrl+W"), disabled: tabCount < 2, run: () => useApp.getState().closeTab(useApp.getState().activeTab) },
     { id: "delete", label: "Delete", hint: "F8", run: () => useApp.getState().askDelete() },
     { id: "rename", label: "Rename", hint: "F2", run: (): void => { useApp.getState().askRename(); } },
     { id: "pattern", label: "Rename with a pattern", run: () => useApp.getState().askPattern() },
@@ -68,7 +71,7 @@ export function CommandPalette() {
       hint: tool.readOnly ? "Read" : "Confirm",
       run: () => openTool(tool),
     })),
-  ], [activePath, folderApp, folderAppSupported, mcpTools, pathStyle]);
+  ], [activePath, folderApp, folderAppSupported, mcpTools, pathStyle, tabCount]);
   if (!open) return null;
   const shown = commands.filter((command) => command.label.toLowerCase().includes(query.trim().toLowerCase()));
   return (

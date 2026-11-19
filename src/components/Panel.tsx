@@ -76,7 +76,7 @@ export function Panel({ side }: { side: Side }) {
       onMouseDown={(event) => {
         setActive(side);
         const target = event.target;
-        if (target instanceof HTMLElement && !target.closest("input, textarea, button, .fp-path")) event.currentTarget.focus();
+        if (target instanceof HTMLElement && !target.closest("input, textarea, button, .fp-path, .fp-code, .fp-edit, .cm-editor")) event.currentTarget.focus();
       }}
       onContextMenu={(event) => {
         if (takeDragMenu(event)) return;

@@ -5,14 +5,17 @@ import type { NameSource, NameTemplate } from "../lib/names";
 import { fileRows, hasLocalMatch, treeRows } from "../lib/rows";
 import { alignScroll, holdScrollSync, setScrollLock } from "../lib/scrollLock";
 import { inTauri, invoke, message, openExternal } from "../lib/platform";
-import { readSession, writeSession } from "../lib/session";
-import type { ChromeMode, Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, ListBatch, McpTool, ModalState, NavPin, Panel, PathStyle, PendingTransfer, Place, SearchListing, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode } from "../types";
+import { readSession, writeSession, type SessionData, type SessionTab } from "../lib/session";
+import type { ChromeMode, Clipboard, CmdChunk, ConnectOffer, ContextMenuState, ConvertReport, DirListing, ListBatch, McpTool, ModalState, NavPin, Panel, PathStyle, PendingTransfer, Place, SearchListing, SftpDraft, SftpProfile, Side, SortKey, ThemeMode, TransferProgress, TransferResult, ViewMode, WorkTab } from "../types";
 import { jobCancel, jobFinish, jobStart, jobUpdate, toast } from "./toastStore";
+
+const TAB_LIMIT = 12;
 
 let deleting = false;
 let transferJob: string | null = null;
 let externalFolder = "";
 let listSeq = 0;
+let tabGen = 0;
 const listActive: Record<Side, number> = { left: 0, right: 0 };
 const listJobs = new Map<number, ListJob>();
 
@@ -252,6 +255,24 @@ function stopSearch(side: Side) {
   if (useApp.getState().panels[side].searching) void invoke("cancel_search").catch(() => undefined);
 }
 
+function clearResume() {
+  if (useApp.getState().modal?.type === "sftpResume") useApp.setState({ modal: null });
+}
+
+function haltPanels() {
+  stopSearch("left");
+  stopSearch("right");
+  for (const side of ["left", "right"] as const) {
+    const prev = listActive[side];
+    if (!prev) continue;
+    const job = listJobs.get(prev);
+    if (job) job.settled = true;
+    listJobs.delete(prev);
+    listActive[side] = 0;
+    void invoke("cancel_list", { id: prev }).catch(() => undefined);
+  }
+}
+
 function scheduleSearch(side: Side) {
   window.clearTimeout(searchTimer[side]);
   searchTimer[side] = window.setTimeout(() => {
@@ -368,6 +389,216 @@ function storedTemplates(value: NameTemplate[] | undefined): NameTemplate[] {
   });
 }
 
+function storedView(value: unknown): ViewMode {
+  return value === "files" || value === "details" || value === "icons" || value === "tree" || value === "preview" ? value : "details";
+}
+
+function panelShell(path: string, view: ViewMode, iconSize: unknown, history: unknown, historyAt: unknown): Panel {
+  const listView: Panel["listView"] = view === "files" || view === "icons" ? view : "details";
+  const hist = storedHistory(history);
+  return {
+    ...emptyPanel(path),
+    view,
+    listView,
+    savedView: view === "preview" ? listView : view,
+    iconSize: iconColumnsOf(iconSize),
+    history: hist,
+    historyAt: storedAt(hist, historyAt),
+    viewHistory: hist.map(() => view),
+  };
+}
+
+function tabFromRow(row: Partial<SessionTab>, id: string): WorkTab {
+  const leftView = storedView(row.leftView);
+  const rightView = storedView(row.rightView);
+  return {
+    id,
+    name: typeof row.name === "string" ? row.name.trim().slice(0, 80) : "",
+    opened: false,
+    active: row.active === "right" ? "right" : "left",
+    split: clamp(typeof row.split === "number" ? row.split : 0.5, 0.18, 0.82),
+    leftNav: row.leftNav === true,
+    rightNav: row.rightNav === true,
+    panels: {
+      left: panelShell(typeof row.leftPath === "string" ? row.leftPath : "", leftView, row.leftIconSize, row.leftHistory, row.leftHistoryAt),
+      right: panelShell(typeof row.rightPath === "string" ? row.rightPath : "", rightView, row.rightIconSize, row.rightHistory, row.rightHistoryAt),
+    },
+  };
+}
+
+function legacyTab(session: SessionData): WorkTab {
+  return tabFromRow({
+    id: "main",
+    name: "",
+    active: "left",
+    split: session.split,
+    leftNav: session.leftNav,
+    rightNav: session.rightNav,
+    leftPath: session.leftPath,
+    rightPath: session.rightPath,
+    leftView: session.leftView,
+    rightView: session.rightView,
+    leftIconSize: session.leftIconSize,
+    rightIconSize: session.rightIconSize,
+    leftHistory: session.leftHistory,
+    rightHistory: session.rightHistory,
+    leftHistoryAt: session.leftHistoryAt,
+    rightHistoryAt: session.rightHistoryAt,
+  }, "main");
+}
+
+function storedWorkTabs(session: SessionData): WorkTab[] {
+  if (!Array.isArray(session.tabs)) return [legacyTab(session)];
+  const tabs: WorkTab[] = [];
+  for (const item of session.tabs) {
+    if (tabs.length >= TAB_LIMIT) break;
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<SessionTab>;
+    const id = typeof row.id === "string" && row.id.trim() ? row.id.trim() : crypto.randomUUID();
+    if (tabs.some((tab) => tab.id === id)) continue;
+    tabs.push(tabFromRow(row, id));
+  }
+  return tabs.length ? tabs : [legacyTab(session)];
+}
+
+function resting(panel: Panel): Panel {
+  return panel.loading || panel.searching ? { ...panel, loading: false, searching: false } : panel;
+}
+
+function captureTab(state: { active: Side; split: number; leftNav: boolean; rightNav: boolean; panels: { left: Panel; right: Panel } }, tab: WorkTab): WorkTab {
+  const layout = {
+    active: state.active,
+    split: state.split,
+    leftNav: state.leftNav,
+    rightNav: state.rightNav,
+  };
+  if (!tab.opened) return { ...tab, ...layout };
+  const busy = state.panels.left.loading || state.panels.right.loading;
+  return {
+    ...tab,
+    ...layout,
+    opened: !busy,
+    panels: { left: resting(state.panels.left), right: resting(state.panels.right) },
+  };
+}
+
+function applyTab(tab: WorkTab) {
+  return {
+    active: tab.active,
+    split: clamp(tab.split, 0.18, 0.82),
+    leftNav: tab.leftNav,
+    rightNav: tab.rightNav,
+    panels: tab.panels,
+  };
+}
+
+function clonedPanel(panel: Panel): Panel {
+  return {
+    ...emptyPanel(panel.path),
+    view: panel.view,
+    listView: panel.listView,
+    savedView: panel.savedView,
+    sortKey: panel.sortKey,
+    sortAsc: panel.sortAsc,
+    iconSize: panel.iconSize,
+    localPath: panel.localPath,
+  };
+}
+
+function folderTabName(path: string): string {
+  const remote = remoteParts(path);
+  const name = baseName(remote?.remote || path).trim();
+  if (!name || name === "/" || name === "\\") return "Files";
+  return name;
+}
+
+function nextTabName(tabs: { name: string }[]): string {
+  const taken = new Set(tabs.map((tab) => tab.name));
+  let count = tabs.length + 1;
+  let name = `Tab ${count}`;
+  while (taken.has(name)) {
+    count += 1;
+    name = `Tab ${count}`;
+  }
+  return name;
+}
+
+function toSessionTab(tab: WorkTab): SessionTab {
+  return {
+    id: tab.id,
+    name: tab.name,
+    active: tab.active,
+    split: tab.split,
+    leftNav: tab.leftNav,
+    rightNav: tab.rightNav,
+    leftPath: tab.panels.left.path,
+    rightPath: tab.panels.right.path,
+    leftView: tab.panels.left.view,
+    rightView: tab.panels.right.view,
+    leftIconSize: tab.panels.left.iconSize,
+    rightIconSize: tab.panels.right.iconSize,
+    leftHistory: tab.panels.left.history,
+    rightHistory: tab.panels.right.history,
+    leftHistoryAt: tab.panels.left.historyAt,
+    rightHistoryAt: tab.panels.right.historyAt,
+  };
+}
+
+async function openRemembered(side: Side, saved: string, home: string, profiles: SftpProfile[], resume: { side: Side; path: string; label: string }[], still: () => boolean) {
+  if (!still()) return;
+  if (!isRemotePath(saved)) {
+    await useApp.getState().navigate(side, saved || home);
+    return;
+  }
+  const desktop = useApp.getState().places.find((place) => place.role === "desktop")?.path || home;
+  const remote = remoteParts(saved);
+  const profile = profiles.find((item) => item.id === remote?.id);
+  const where = remote?.remote || "/";
+  resume.push({ side, path: saved, label: profile?.label ? `${profile.label} (${where})` : where });
+  if (!still()) return;
+  await useApp.getState().navigate(side, desktop, false);
+  if (!still()) return;
+  const shown = useApp.getState().panels[side].path || desktop;
+  useApp.setState((state) => ({ panels: patch(state.panels, side, { history: [shown], historyAt: 0, viewHistory: [state.panels[side].view] }) }));
+}
+
+async function finishCold(id: string, gen: number) {
+  const still = () => gen === tabGen && useApp.getState().activeTab === id;
+  const tab = useApp.getState().tabs.find((item) => item.id === id);
+  if (!tab || !still()) return;
+  const leftPath = tab.panels.left.path;
+  const rightPath = tab.panels.right.path;
+  const resume: { side: Side; path: string; label: string }[] = [];
+  let profiles: SftpProfile[] = [];
+  if (inTauri() && (isRemotePath(leftPath) || isRemotePath(rightPath))) {
+    try {
+      profiles = await invoke<SftpProfile[]>("sftp_profiles");
+    } catch {
+      profiles = [];
+    }
+  }
+  if (!still()) return;
+  let home = "";
+  if (inTauri()) {
+    try {
+      home = await invoke<string>("home_dir");
+    } catch {
+      home = "";
+    }
+  }
+  await openRemembered("left", leftPath, home, profiles, resume, still);
+  if (!still()) return;
+  await openRemembered("right", rightPath, home, profiles, resume, still);
+  if (!still()) return;
+  useApp.setState((state) => {
+    if (state.activeTab !== id) return {};
+    return {
+      tabs: state.tabs.map((item) => item.id === id ? { ...item, opened: true } : item),
+      ...(resume.length && (!state.modal || state.modal.type === "sftpResume") ? { modal: { type: "sftpResume" as const, items: resume } } : {}),
+    };
+  });
+}
+
 interface AppState {
   ready: boolean;
   theme: ThemeMode;
@@ -375,6 +606,8 @@ interface AppState {
   pathStyle: PathStyle;
   active: Side;
   panels: { left: Panel; right: Panel };
+  tabs: WorkTab[];
+  activeTab: string;
   showHidden: boolean;
   iconColors: boolean;
   keyBar: boolean;
@@ -421,6 +654,11 @@ interface AppState {
   setPathStyle: (pathStyle: PathStyle) => void;
   setActive: (side: Side) => void;
   cyclePanel: (dir: 1 | -1) => void;
+  newTab: () => Promise<void>;
+  switchTab: (id: string) => Promise<void>;
+  cycleTab: (dir: 1 | -1) => void;
+  renameTab: (id: string, name: string) => void;
+  closeTab: (id: string) => void;
   navigate: (side: Side, path: string, record?: boolean) => Promise<void>;
   goHistory: (side: Side, dir: -1 | 1) => Promise<void>;
   refresh: (side: Side) => Promise<void>;
@@ -522,6 +760,17 @@ export const useApp = create<AppState>((set, get) => ({
   pathStyle: "breadcrumb",
   active: "left",
   panels: { left: emptyPanel(), right: emptyPanel() },
+  tabs: [{
+    id: "main",
+    name: "",
+    opened: false,
+    active: "left" as Side,
+    split: 0.5,
+    leftNav: false,
+    rightNav: false,
+    panels: { left: emptyPanel(), right: emptyPanel() },
+  }],
+  activeTab: "main",
   showHidden: false,
   iconColors: true,
   keyBar: true,
@@ -581,7 +830,11 @@ export const useApp = create<AppState>((set, get) => ({
       }
     }
     setScrollLock(session.scrollLock);
-    const listView = (view: ViewMode): Panel["listView"] => (view === "files" || view === "icons" ? view : "details");
+    const workTabs = storedWorkTabs(session);
+    const activeId = workTabs.some((tab) => tab.id === session.activeTab) ? session.activeTab ?? workTabs[0].id : workTabs[0].id;
+    const activeTab = workTabs.find((tab) => tab.id === activeId) ?? workTabs[0];
+    const gen = ++tabGen;
+    const still = () => gen === tabGen;
     set({
       theme: session.theme,
       chrome: session.chrome === "modern" ? "modern" : "classic",
@@ -593,37 +846,21 @@ export const useApp = create<AppState>((set, get) => ({
       iconTints: storedTints(session.iconTints),
       recent: session.recent,
       commandHistory: session.commandHistory,
-      split: clamp(session.split, 0.18, 0.82),
+      split: activeTab.split,
       outputHeight: clamp(session.outputHeight, 72, 800),
       terminalHeight: clamp(session.terminalHeight, 120, 800),
       nameTemplates: storedTemplates(session.nameTemplates),
-      leftNav: session.leftNav === true,
-      rightNav: session.rightNav === true,
+      leftNav: activeTab.leftNav,
+      rightNav: activeTab.rightNav,
+      active: activeTab.active,
       pins: storedPins(session.pins, places),
       places,
       textpad,
       folderAppSupported,
       folderApp,
-      panels: {
-        left: {
-          ...emptyPanel(),
-          view: session.leftView,
-          listView: listView(session.leftView),
-          iconSize: iconColumnsOf(session.leftIconSize),
-          history: storedHistory(session.leftHistory),
-          historyAt: storedAt(storedHistory(session.leftHistory), session.leftHistoryAt),
-          viewHistory: storedHistory(session.leftHistory).map(() => session.leftView),
-        },
-        right: {
-          ...emptyPanel(),
-          view: session.rightView,
-          listView: listView(session.rightView),
-          iconSize: iconColumnsOf(session.rightIconSize),
-          history: storedHistory(session.rightHistory),
-          historyAt: storedAt(storedHistory(session.rightHistory), session.rightHistoryAt),
-          viewHistory: storedHistory(session.rightHistory).map(() => session.rightView),
-        },
-      },
+      tabs: workTabs,
+      activeTab: activeId,
+      panels: activeTab.panels,
     });
     let launch = "";
     if (inTauri()) {
@@ -637,33 +874,29 @@ export const useApp = create<AppState>((set, get) => ({
       launch = externalFolder;
       externalFolder = "";
     }
-    const desktop = places.find((place) => place.role === "desktop")?.path || home;
+    const leftPath = launch || activeTab.panels.left.path;
+    const rightPath = activeTab.panels.right.path;
     const resume: { side: Side; path: string; label: string }[] = [];
     let profiles: SftpProfile[] = [];
-    if (inTauri() && (isRemotePath(session.leftPath) || isRemotePath(session.rightPath))) {
+    if (inTauri() && (isRemotePath(leftPath) || isRemotePath(rightPath))) {
       try {
         profiles = await invoke<SftpProfile[]>("sftp_profiles");
       } catch {
         profiles = [];
       }
     }
-    const openSaved = async (side: Side, saved: string) => {
-      if (!isRemotePath(saved)) {
-        await get().navigate(side, saved || home);
-        return;
-      }
-      const remote = remoteParts(saved);
-      const profile = profiles.find((item) => item.id === remote?.id);
-      const where = remote?.remote || "/";
-      resume.push({ side, path: saved, label: profile?.label ? `${profile.label} (${where})` : where });
-      await get().navigate(side, desktop || home, false);
-      const shown = get().panels[side].path || desktop || home;
-      set((state) => ({ panels: patch(state.panels, side, { history: [shown], historyAt: 0, viewHistory: [state.panels[side].view] }) }));
-    };
-    await openSaved("left", launch || session.leftPath);
-    if (launch && get().panels.left.view === "preview") get().setView("left", get().panels.left.listView);
-    await openSaved("right", session.rightPath);
-    set({ ready: true, ...(resume.length ? { modal: { type: "sftpResume", items: resume } } : {}) });
+    await openRemembered("left", leftPath, home, profiles, resume, still);
+    if (still() && launch && get().panels.left.view === "preview") get().setView("left", get().panels.left.listView);
+    if (still()) await openRemembered("right", rightPath, home, profiles, resume, still);
+    if (!still()) {
+      set({ ready: true });
+    } else {
+      set((state) => ({
+        ready: true,
+        tabs: state.tabs.map((tab) => tab.id === activeId ? { ...captureTab(state, { ...tab, opened: true }), opened: true } : tab),
+        ...(resume.length ? { modal: { type: "sftpResume" as const, items: resume } } : {}),
+      }));
+    }
     if (externalFolder) {
       const late = externalFolder;
       externalFolder = "";
@@ -673,35 +906,39 @@ export const useApp = create<AppState>((set, get) => ({
 
   persist: async () => {
     const state = get();
+    const savedTabs = state.tabs.map((tab) => toSessionTab(tab.id === state.activeTab ? captureTab(state, tab) : tab));
+    const active = savedTabs.find((tab) => tab.id === state.activeTab) ?? savedTabs[0];
     await writeSession({
       theme: state.theme,
       chrome: state.chrome,
       pathStyle: state.pathStyle,
-      leftPath: state.panels.left.path,
-      rightPath: state.panels.right.path,
-      leftView: state.panels.left.view,
-      rightView: state.panels.right.view,
+      leftPath: active?.leftPath ?? state.panels.left.path,
+      rightPath: active?.rightPath ?? state.panels.right.path,
+      leftView: active?.leftView ?? state.panels.left.view,
+      rightView: active?.rightView ?? state.panels.right.view,
       showHidden: state.showHidden,
       iconColors: state.iconColors,
-      iconSize: state.panels.left.iconSize,
-      leftIconSize: state.panels.left.iconSize,
-      rightIconSize: state.panels.right.iconSize,
+      iconSize: active?.leftIconSize ?? state.panels.left.iconSize,
+      leftIconSize: active?.leftIconSize ?? state.panels.left.iconSize,
+      rightIconSize: active?.rightIconSize ?? state.panels.right.iconSize,
       keyBar: state.keyBar,
       scrollLock: state.scrollLock,
       iconTints: state.iconTints,
-      leftHistory: state.panels.left.history,
-      rightHistory: state.panels.right.history,
-      leftHistoryAt: state.panels.left.historyAt,
-      rightHistoryAt: state.panels.right.historyAt,
+      leftHistory: active?.leftHistory ?? state.panels.left.history,
+      rightHistory: active?.rightHistory ?? state.panels.right.history,
+      leftHistoryAt: active?.leftHistoryAt ?? state.panels.left.historyAt,
+      rightHistoryAt: active?.rightHistoryAt ?? state.panels.right.historyAt,
       recent: state.recent,
       commandHistory: state.commandHistory,
-      split: state.split,
+      split: active?.split ?? state.split,
       outputHeight: state.outputHeight,
       terminalHeight: state.terminalHeight,
       nameTemplates: state.nameTemplates,
-      leftNav: state.leftNav,
-      rightNav: state.rightNav,
+      leftNav: active?.leftNav ?? state.leftNav,
+      rightNav: active?.rightNav ?? state.rightNav,
       pins: state.pins,
+      activeTab: state.activeTab,
+      tabs: savedTabs,
     });
   },
 
@@ -750,6 +987,88 @@ export const useApp = create<AppState>((set, get) => ({
   setPathStyle: (pathStyle) => set({ pathStyle }),
   setActive: (side) => set({ active: side }),
   cyclePanel: (dir) => set({ active: dir === 1 ? "right" : "left" }),
+
+  newTab: async () => {
+    const state = get();
+    if (!state.ready) return;
+    if (state.tabs.length >= TAB_LIMIT) {
+      toast("warning", "FilePad keeps up to 12 tabs.");
+      return;
+    }
+    const gen = ++tabGen;
+    clearResume();
+    haltPanels();
+    const id = crypto.randomUUID();
+    const current = state.tabs.find((tab) => tab.id === state.activeTab);
+    const currentName = current?.name.trim() ? current.name : folderTabName(state.panels.left.path);
+    const kept = state.tabs.map((tab) => tab.id === state.activeTab ? { ...captureTab(state, tab), name: currentName } : tab);
+    const fresh: WorkTab = {
+      id,
+      name: nextTabName(kept),
+      opened: false,
+      active: state.active,
+      split: state.split,
+      leftNav: state.leftNav,
+      rightNav: state.rightNav,
+      panels: { left: clonedPanel(state.panels.left), right: clonedPanel(state.panels.right) },
+    };
+    const leftPath = fresh.panels.left.path;
+    const rightPath = fresh.panels.right.path;
+    set({ tabs: [...kept, fresh], activeTab: id, ...applyTab(fresh), contextMenu: null });
+    const still = () => gen === tabGen && get().activeTab === id;
+    await get().navigate("left", leftPath);
+    if (!still()) return;
+    await get().navigate("right", rightPath);
+    if (!still()) return;
+    set((now) => ({ tabs: now.tabs.map((tab) => tab.id === id ? { ...tab, opened: true } : tab) }));
+  },
+
+  switchTab: async (id) => {
+    const state = get();
+    if (!state.ready || state.activeTab === id) return;
+    const target = state.tabs.find((tab) => tab.id === id);
+    if (!target) return;
+    const gen = ++tabGen;
+    clearResume();
+    haltPanels();
+    const tabs = state.tabs.map((tab) => tab.id === state.activeTab ? captureTab(state, tab) : tab);
+    const next = tabs.find((tab) => tab.id === id) ?? target;
+    set({ tabs, activeTab: id, ...applyTab(next), contextMenu: null });
+    if (!next.opened) await finishCold(id, gen);
+  },
+
+  cycleTab: (dir) => {
+    const state = get();
+    if (!state.ready || state.tabs.length < 2) return;
+    const index = state.tabs.findIndex((tab) => tab.id === state.activeTab);
+    const at = index < 0 ? 0 : index;
+    const next = (at + dir + state.tabs.length) % state.tabs.length;
+    void get().switchTab(state.tabs[next].id);
+  },
+
+  renameTab: (id, name) => {
+    const next = name.trim().slice(0, 80);
+    if (!next) return;
+    set((state) => ({ tabs: state.tabs.map((tab) => tab.id === id ? { ...tab, name: next } : tab) }));
+  },
+
+  closeTab: (id) => {
+    const state = get();
+    if (!state.ready || state.tabs.length < 2) return;
+    const index = state.tabs.findIndex((tab) => tab.id === id);
+    if (index < 0) return;
+    if (state.activeTab !== id) {
+      set({ tabs: state.tabs.filter((tab) => tab.id !== id), contextMenu: null });
+      return;
+    }
+    const gen = ++tabGen;
+    clearResume();
+    haltPanels();
+    const tabs = state.tabs.filter((tab) => tab.id !== id);
+    const next = tabs[Math.min(index, tabs.length - 1)];
+    set({ tabs, activeTab: next.id, ...applyTab(next), contextMenu: null });
+    if (!next.opened) void finishCold(next.id, gen);
+  },
 
   navigate: async (side, raw, record = true) => {
     stopSearch(side);

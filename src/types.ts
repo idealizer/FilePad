@@ -80,6 +80,17 @@ export interface Panel {
   iconSize: number;
 }
 
+export interface WorkTab {
+  id: string;
+  name: string;
+  opened: boolean;
+  active: Side;
+  split: number;
+  leftNav: boolean;
+  rightNav: boolean;
+  panels: { left: Panel; right: Panel };
+}
+
 export interface Clipboard {
   mode: "copy" | "cut";
   paths: string[];

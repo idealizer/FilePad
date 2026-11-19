@@ -1,4 +1,4 @@
-import { AppWindow, ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderOpen, FolderPlus, Ghost, Keyboard, Link2, Minus, Monitor, Moon, Palette, Pencil, Plus, Square, SquareTerminal, Sun, Terminal, Trash2, Unlink, X } from "lucide-react";
+import { AppWindow, ArrowRightLeft, Columns2, Command, Copy, Eye, FilePlus, FolderOpen, FolderPlus, Ghost, Keyboard, Link2, Minus, Monitor, Moon, Palette, Pencil, Plus, Square, SquareStack, SquareTerminal, Sun, Terminal, Trash2, Unlink, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { inTauri, isWindows, keys } from "../lib/platform";
 import { useApp } from "../stores/appStore";
@@ -82,6 +82,7 @@ export function Toolbar() {
   const split = useApp((state) => state.split);
   const askMkdir = useApp((state) => state.askMkdir);
   const askMkfile = useApp((state) => state.askMkfile);
+  const newTab = useApp((state) => state.newTab);
   const askAbout = useApp((state) => state.askAbout);
   const folderAppSupported = useApp((state) => state.folderAppSupported);
   const folderApp = useApp((state) => state.folderApp);
@@ -152,6 +153,7 @@ export function Toolbar() {
           <>
             <MenuItem icon={<FolderPlus />} label="Folder" hint="F7" onClick={() => { close(); askMkdir(); }} />
             <MenuItem icon={<FilePlus />} label="File" hint={keys("Shift+F7")} onClick={() => { close(); askMkfile(); }} />
+            <MenuItem icon={<SquareStack />} label="Tab" onClick={() => { close(); void newTab(); }} />
           </>
         )}
       </Dropdown>

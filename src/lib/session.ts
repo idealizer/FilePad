@@ -1,4 +1,23 @@
-import type { ChromeMode, NavPin, PathStyle, ThemeMode, ViewMode } from "../types";
+import type { ChromeMode, NavPin, PathStyle, Side, ThemeMode, ViewMode } from "../types";
+
+export interface SessionTab {
+  id: string;
+  name: string;
+  active: Side;
+  split: number;
+  leftNav: boolean;
+  rightNav: boolean;
+  leftPath: string;
+  rightPath: string;
+  leftView: ViewMode;
+  rightView: ViewMode;
+  leftIconSize: number;
+  rightIconSize: number;
+  leftHistory: string[];
+  rightHistory: string[];
+  leftHistoryAt: number;
+  rightHistoryAt: number;
+}
 import { ICON_COLUMNS_DEFAULT } from "./iconSize";
 import type { NameTemplate } from "./names";
 import { inTauri } from "./platform";
@@ -32,6 +51,8 @@ export interface SessionData {
   leftNav: boolean;
   rightNav: boolean;
   pins?: NavPin[];
+  activeTab?: string;
+  tabs?: SessionTab[];
 }
 
 const FALLBACK = "filepad-session";
